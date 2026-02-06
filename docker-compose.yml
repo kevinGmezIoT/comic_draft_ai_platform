@@ -1,0 +1,71 @@
+version: '3.8'
+
+services:
+  # Database
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: comic_db
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: pass
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # Redis for Celery
+  redis:
+    image: redis:7-alpine
+
+  # Django Backend
+  backend:
+    build: ./backend
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - ./backend:/app
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgres://user:pass@db:5432/comic_db
+      - AGENT_SERVICE_URL=http://agent:8001
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - db
+      - redis
+
+  # Agent API (Flask)
+  agent:
+    build: ./agent
+    command: python app.py
+    volumes:
+      - ./agent:/app
+    ports:
+      - "8001:8001"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - BACKEND_INTERNAL_URL=http://backend:8000
+    depends_on:
+      - redis
+
+  # Agent Worker (Celery)
+  agent-worker:
+    build: ./agent
+    command: celery -A worker.celery_app worker --loglevel=info
+    volumes:
+      - ./agent:/app
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - BACKEND_INTERNAL_URL=http://backend:8000
+    depends_on:
+      - redis
+
+  # React Frontend
+  frontend:
+    build: ./frontend
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_URL=http://localhost:8000/api
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:

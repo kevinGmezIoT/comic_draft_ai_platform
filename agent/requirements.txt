@@ -1,0 +1,17 @@
+flask
+flask-cors
+python-dotenv
+langchain
+langchain-openai
+langchain-community
+langchain-text-splitters
+langgraph
+pydantic
+requests
+boto3
+celery[redis]
+redis
+chromadb
+pypdf
+docx2txt
+tiktoken
