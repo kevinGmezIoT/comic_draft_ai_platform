@@ -73,8 +73,22 @@ class CharacterManager:
     """Gestiona la consistencia de personajes mediante 'Character Bibles'"""
     def __init__(self, project_id: str):
         self.project_id = project_id
-        # En una versión real, esto persistiría en una base de datos o JSON
-        self.characters = {} 
+        self.base_path = f"./data/projects/{project_id}"
+        os.makedirs(self.base_path, exist_ok=True)
+        self.file_path = f"{self.base_path}/characters.json"
+        self.characters = self._load()
+
+    def _load(self):
+        if os.path.exists(self.file_path):
+            import json
+            with open(self.file_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        return {}
+
+    def _save(self):
+        import json
+        with open(self.file_path, "w", encoding="utf-8") as f:
+            json.dump(self.characters, f, indent=4)
 
     def register_character(self, name: str, description: str, reference_images: list):
         self.characters[name] = {
@@ -82,6 +96,7 @@ class CharacterManager:
             "ref_images": reference_images, # URLs de S3 con turnarounds
             "traits": [] # Rasgos extraídos automáticamente
         }
+        self._save()
 
     def get_character_prompt_segment(self, name: str):
         if name in self.characters:

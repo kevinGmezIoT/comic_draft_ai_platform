@@ -37,8 +37,36 @@ class BedrockTitanAdapter(ImageModelAdapter):
         self.client = boto3.client("bedrock-runtime", region_name=os.getenv("AWS_REGION"))
 
     def generate_image(self, prompt: str, aspect_ratio: str = "1:1", **kwargs) -> str:
-        # Lógica para Amazon Titan Image Generator
-        pass
+        import json
+        import base64
+        
+        body = json.dumps({
+            "taskType": "TEXT_IMAGE",
+            "textToImageParams": {
+                "text": prompt
+            },
+            "imageGenerationConfig": {
+                "numberOfImages": 1,
+                "height": 1024,
+                "width": 1024,
+                "cfgScale": 8.0,
+                "seed": 0
+            }
+        })
+
+        response = self.client.invoke_model(
+            body=body,
+            modelId="amazon.titan-image-generator-v1",
+            accept="application/json",
+            contentType="application/json"
+        )
+
+        response_body = json.loads(response.get("body").read())
+        base64_image = response_body.get("images")[0]
+        
+        # En una implementación real, subirías esto a S3 y devolverías la URL.
+        # Para el prototipo, devolvemos el data-uri si es pequeño o una ruta simulada.
+        return f"data:image/png;base64,{base64_image}"
 
     def edit_image(self, original_image_url: str, prompt: str, mask_url: str = None) -> str:
         # Implementar Inpainting/Outpainting con Titan
