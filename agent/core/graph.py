@@ -23,12 +23,14 @@ class AgentState(TypedDict):
     sources: List[str]
     max_pages: int
     max_panels: int
+    max_panels_per_page: int
     layout_style: str # "dynamic" | "vertical" | "grid"
     world_model_summary: str
     full_script: str
     script_outline: List[str]
     panels: List[Panel]
     merged_pages: List[dict] # [{page_number: 1, image_url: "..."}]
+    plan_only: bool = False
     current_step: str
 
 def ingest_and_rag(state: AgentState):
@@ -82,6 +84,18 @@ def world_model_builder(state: AgentState):
     return {"current_step": "planner"}
 
 def planner(state: AgentState):
+    existing_panels = state.get("panels", [])
+    max_panels = state.get("max_panels")
+    
+    # Solo salteamos si ya hay paneles Y no hay una contradicción con max_panels
+    # Si max_panels está definido y es diferente al actual, debemos RE-PLANEAR
+    if existing_panels and len(existing_panels) > 0:
+        if not max_panels or len(existing_panels) == max_panels:
+            print("--- SKIPPING STRATEGIC PLANNING (Existing layout fulfills count) ---")
+            return {"current_step": "layout_designer"}
+        else:
+            print(f"--- RE-PLANNING: Current count {len(existing_panels)} vs Target {max_panels} ---")
+
     print("--- STRATEGIC PLANNING ---")
     # Usar un modelo capaz de razonar el layout
     llm = ChatOpenAI(model="gpt-4o", temperature=0.2)
@@ -96,47 +110,86 @@ def planner(state: AgentState):
     {state['full_script']}
     
     Divide la historia en una lista de paneles para un cómic. 
-    REGLAS DE LAYOUT Y CREATIVIDAD:
-    - MÁXIMO DE {state.get('max_pages', 3)} PÁGINAS.
+    REGLAS ESTRICTAS DE LAYOUT:
+    - MÁXIMO ABSOLUTO DE {state.get('max_pages', 3)} PÁGINAS. No te pases de este número.
+    - MÁXIMO DE {state.get('max_panels_per_page', 4)} PANELES POR PÁGINA.
     - CANTIDAD TOTAL DE PANELES REQUERIDA: {state.get('max_panels') if state.get('max_panels') else 'Tu decisión experta'}.
-    - EVITA EL GRID RÍGIDO: Sugiere composiciones dinámicas (paneles que se solapan, ángulos cinematográficos, espacios negativos).
-    - FLUJO NARRATIVO: Cada panel debe tener un propósito visual claro.
+    - IMPORTANTE: Si 'CANTIDAD TOTAL DE PANELES' está definida (es un número), DEBES generar EXACTAMENTE ese número de paneles, repartidos en las páginas indicadas.
     
-    Si 'CANTIDAD TOTAL DE PANELES' está definida, DEBES ajustarte exactamente a ese número.
+    ESTILO NARRATIVO:
+    - EVITA EL GRID RÍGIDO: Sugiere composiciones dinámicas (paneles que se solapan, ángulos cinematográficos).
+    - COMPOSICIONES: Si el usuario pide algo específico como "enfrentados", refléjalo en el prompt y la descripción.
     
     Para cada panel, proporciona:
     - id: un identificador único (ej: p1_1)
     - page_number: número de página (máximo {state.get('max_pages', 3)})
     - order_in_page: orden del panel en la página
     - scene_description: descripción detallada de la acción
-    - characters: lista de nombres de personajes presentes (exactamente como se llaman en el summary)
-    - prompt: un prompt visual rico para generación de imagen (DALL-E 3 style), insistiendo en el ángulo de cámara y la iluminación.
+    - characters: lista de nombres de personajes presentes.
+    - prompt: un prompt visual rico para generación de imagen.
     
     Responde ÚNICAMENTE con un JSON válido (lista de objetos).
     """
     
     try:
-        response = llm.invoke([
-            SystemMessage(content="Eres un director de arte de cómics experto en descomposición de guiones."),
-            HumanMessage(content=prompt)
-        ])
+        # Fallback si no hay script ni guión (Prototipo/S3 simulado)
+        if not state.get('full_script') or len(state['full_script'].strip()) < 10:
+            print("--- WARNING: Script empty or too short. Using Template Fallback. ---")
+            target_count = state.get('max_panels', 4) or 4
+            panels = []
+            for i in range(target_count):
+                panels.append({
+                    "id": f"p_temp_{i+1}",
+                    "page_number": 1,
+                    "order_in_page": i + 1,
+                    "scene_description": f"Escena {i+1} (Plantilla)",
+                    "characters": [],
+                    "prompt": "Cinematic comic panel placeholder"
+                })
+        else:
+            response = llm.invoke([
+                SystemMessage(content="Eres un director de arte de cómics experto en descomposición de guiones. Responde SIEMPRE con un JSON válido."),
+                HumanMessage(content=prompt)
+            ])
+            
+            content = response.content.strip()
+            print(f"DEBUG: LLM Planner Output: {content[:200]}...")
+
+            if content.startswith("```json"):
+                content = content[7:-3].strip()
+            
+            data = json.loads(content)
+            # Manejar tanto lista [...] como objeto {"panels": [...]}
+            if isinstance(data, dict):
+                panels = data.get("panels", [])
+            else:
+                panels = data
         
-        content = response.content.strip()
-        if content.startswith("```json"):
-            content = content[7:-3].strip()
-        
-        panels = json.loads(content)
-        
+        if not panels:
+             raise ValueError("No panels were generated by the LLM or Fallback")
+
         # Inicializar campos faltantes
-        for p in panels:
+        for i, p in enumerate(panels):
+            p.setdefault("id", f"p_{i}")
             p.setdefault("image_url", "")
             p.setdefault("status", "pending")
             
         return {"panels": panels, "current_step": "layout_designer"}
     except Exception as e:
         print(f"Error en planner: {e}")
-        # Fallback a un panel de error o vacío
-        return {"panels": [], "current_step": "error"}
+        # Segundo nivel de fallback: Generar paneles mínimos forzados
+        target_count = state.get('max_panels') or state.get('max_pages', 1) * 2
+        fallback_panels = [{
+            "id": f"f_{i}",
+            "page_number": (i // state.get('max_panels_per_page', 4)) + 1,
+            "order_in_page": i + 1,
+            "scene_description": "Escena generada por recuperación de error.",
+            "characters": [],
+            "prompt": "Comic panel placeholder",
+            "image_url": "",
+            "status": "pending"
+        } for i in range(target_count)]
+        return {"panels": fallback_panels, "current_step": "layout_designer"}
 
 def image_generator(state: AgentState):
     print("--- CONSISTENT IMAGE GENERATION ---")
@@ -174,6 +227,12 @@ def image_generator(state: AgentState):
 def layout_designer(state: AgentState):
     print("--- DEFINING PAGE LAYOUTS (Templates) ---")
     panels = state["panels"]
+    
+    # Si los paneles ya tienen un layout definido (ej: por edición manual previa), respetarlo
+    if any(p.get("layout") and p["layout"].get("w") for p in panels):
+        print("--- SKIPPING LAYOUT DESIGN (Layout already defined) ---")
+        return {"panels": panels, "current_step": "generator"}
+
     # Agrupar por página
     pages = {}
     for p in panels:
@@ -205,16 +264,30 @@ def layout_designer(state: AgentState):
                 if count == 1:
                     p["layout"] = {"x": 0, "y": 0, "w": 100, "h": 100}
                 elif count == 2:
-                    p["layout"] = {"x": 0, "y": i*50, "w": 100, "h": 50}
+                    # Si es confrontación (o simplemente 2), pondremos uno a cada lado
+                    prompt_lower = str(p.get("prompt", "")).lower()
+                    if "enfrentados" in prompt_lower or "confrontation" in prompt_lower or "face-off" in prompt_lower:
+                        if i == 0:
+                            p["layout"] = {"x": 5, "y": 10, "w": 42, "h": 80} # Izquierda (cinemático)
+                        else:
+                            p["layout"] = {"x": 53, "y": 10, "w": 42, "h": 80} # Derecha
+                    elif "vertical split" in prompt_lower:
+                        p["layout"] = {"x": i*50, "y": 0, "w": 50, "h": 100}
+                    else:
+                        p["layout"] = {"x": 0, "y": i*50, "w": 100, "h": 50}
                 elif count == 3:
                     if i == 0:
-                        p["layout"] = {"x": 0, "y": 0, "w": 100, "h": 50}
+                        p["layout"] = {"x": 0, "y": 0, "w": 100, "h": 40}
                     else:
-                        p["layout"] = {"x": (i-1)*50, "y": 50, "w": 50, "h": 50}
-                else: # 4 o más
+                        p["layout"] = {"x": (i-1)*50, "y": 40, "w": 50, "h": 60}
+                elif count == 4:
+                     # Cuadrícula 2x2 elegante
+                     p["layout"] = {"x": (i%2)*50, "y": (i//2)*50, "w": 50, "h": 50}
+                else: # 5 o más
                     row = i // 2
                     col = i % 2
-                    p["layout"] = {"x": col*50, "y": row*50, "w": 50, "h": 50}
+                    h = 100 / ( (count + 1) // 2 )
+                    p["layout"] = {"x": col*50, "y": row*h, "w": 50, "h": h}
             
             updated_panels.append(p)
 
@@ -342,10 +415,24 @@ def create_comic_graph():
     workflow.add_node("merger", page_merger)
 
     workflow.set_entry_point("ingest")
-    workflow.add_edge("ingest", "world_model_builder")
     workflow.add_edge("world_model_builder", "planner")
     workflow.add_edge("planner", "layout_designer")
-    workflow.add_edge("layout_designer", "generator")
+
+    # Camino condicional según plan_only
+    def should_continue(state: AgentState):
+        if state.get("plan_only"):
+            return "end"
+        return "continue"
+
+    workflow.add_conditional_edges(
+        "layout_designer",
+        should_continue,
+        {
+            "end": END,
+            "continue": "generator"
+        }
+    )
+
     workflow.add_edge("generator", "balloons")
     workflow.add_edge("balloons", "merger")
     workflow.add_edge("merger", END)

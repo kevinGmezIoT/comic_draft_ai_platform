@@ -22,10 +22,22 @@ def generate_comic():
     max_pages = data.get("max_pages", 3)
     max_panels = data.get("max_panels")
     layout_style = data.get("layout_style", "dynamic")
+    max_panels_per_page = data.get("max_panels_per_page", 4)
+    plan_only = data.get("plan_only", False)
+    panels = data.get("panels", [])
 
     from worker import generate_comic_async
     # Disparar tarea asíncrona en Celery
-    task = generate_comic_async.delay(project_id, sources, max_pages, max_panels, layout_style)
+    task = generate_comic_async.delay(
+        project_id, 
+        sources, 
+        max_pages, 
+        max_panels, 
+        layout_style,
+        max_panels_per_page=max_panels_per_page,
+        plan_only=plan_only,
+        panels=panels
+    )
 
     return jsonify({
         "project_id": project_id,

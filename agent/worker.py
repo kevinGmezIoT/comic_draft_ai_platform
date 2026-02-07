@@ -16,7 +16,7 @@ celery_app = Celery(
 graph = create_comic_graph()
 
 @celery_app.task(name='generate_comic_async')
-def generate_comic_async(project_id, sources, max_pages=3, max_panels=None, layout_style="dynamic"):
+def generate_comic_async(project_id, sources, max_pages=3, max_panels=None, layout_style="dynamic", **kwargs):
     print(f"Propagating task for project: {project_id}")
     
     initial_state = {
@@ -24,8 +24,10 @@ def generate_comic_async(project_id, sources, max_pages=3, max_panels=None, layo
         "sources": sources,
         "max_pages": max_pages,
         "max_panels": max_panels,
+        "max_panels_per_page": kwargs.get("max_panels_per_page", 4),
         "layout_style": layout_style,
-        "panels": [],
+        "plan_only": kwargs.get("plan_only", False),
+        "panels": kwargs.get("panels", []),
         "merged_pages": [],
         "world_model_summary": "",
         "script_outline": [],
