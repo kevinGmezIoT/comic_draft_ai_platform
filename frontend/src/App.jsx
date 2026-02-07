@@ -14,6 +14,12 @@ function App() {
     const [viewMode, setViewMode] = useState('draft'); // 'draft' | 'organic'
     const [error, setError] = useState(null);
     const [projectId] = useState("df81774e-5612-4c6e-88c9-5a1e8a9f6d4a");
+    const [editingPrompt, setEditingPrompt] = useState("");
+    const [editingDescription, setEditingDescription] = useState("");
+    const [editingBalloons, setEditingBalloons] = useState([]);
+    const [mergeInstructions, setMergeInstructions] = useState("");
+    const [saving, setSaving] = useState(false);
+    const [regenerating, setRegenerating] = useState(false);
 
     const fetchPanels = async () => {
         try {
@@ -33,6 +39,18 @@ function App() {
         fetchPanels();
     }, []);
 
+    useEffect(() => {
+        if (selectedPanel) {
+            setEditingPrompt(selectedPanel.prompt || "");
+            setEditingDescription(selectedPanel.scene_description || "");
+            setEditingBalloons(selectedPanel.balloons || []);
+        } else {
+            setEditingPrompt("");
+            setEditingDescription("");
+            setEditingBalloons([]);
+        }
+    }, [selectedPanel]);
+
     const handleGenerate = async () => {
         setLoading(true);
         setError(null);
@@ -42,25 +60,102 @@ function App() {
                 max_panels: maxPanels,
                 layout_style: layoutStyle
             });
-            const interval = setInterval(async () => {
-                const response = await axios.get(`${import.meta.env.VITE_API_URL}/projects/${projectId}/`);
-
-                if (response.data.status === 'failed') {
-                    setError(response.data.last_error);
-                    setLoading(false);
-                    clearInterval(interval);
-                } else if (response.data.pages && response.data.pages.length > 0) {
-                    setPages(response.data.pages);
-                    const allPanels = response.data.pages.flatMap(p => p.panels);
-                    setPanels(allPanels);
-                    setLoading(false);
-                    clearInterval(interval);
-                }
-            }, 3000);
+            startPollingStatus();
         } catch (error) {
             console.error("Error generating comic:", error);
             setLoading(false);
         }
+    };
+
+    const startPollingStatus = () => {
+        const interval = setInterval(async () => {
+            const response = await axios.get(`${import.meta.env.VITE_API_URL}/projects/${projectId}/`);
+
+            if (response.data.status === 'failed') {
+                setError(response.data.last_error);
+                setLoading(false);
+                setRegenerating(false);
+                clearInterval(interval);
+            } else if (response.data.status === 'completed') {
+                if (response.data.pages) {
+                    setPages(response.data.pages);
+                    const allPanels = response.data.pages.flatMap(p => p.panels);
+                    setPanels(allPanels);
+
+                    // Si habia un panel seleccionado, actualizar su referencia
+                    if (selectedPanel) {
+                        const updated = allPanels.find(p => p.id === selectedPanel.id);
+                        if (updated) setSelectedPanel(updated);
+                    }
+                }
+                setLoading(false);
+                setRegenerating(false);
+                clearInterval(interval);
+            }
+        }, 3000);
+    };
+
+    const handleApplyChanges = async () => {
+        if (!selectedPanel) return;
+        setSaving(true);
+        try {
+            await axios.patch(`${import.meta.env.VITE_API_URL}/panels/${selectedPanel.id}/update/`, {
+                prompt: editingPrompt,
+                scene_description: editingDescription,
+                balloons: editingBalloons
+            });
+
+            // Actualizar localmente
+            const updatedPanel = {
+                ...selectedPanel,
+                prompt: editingPrompt,
+                scene_description: editingDescription,
+                balloons: editingBalloons
+            };
+
+            setPanels(prev => prev.map(p => p.id === selectedPanel.id ? updatedPanel : p));
+            setSelectedPanel(updatedPanel);
+
+            setSaving(false);
+        } catch (error) {
+            console.error("Error updating panel:", error);
+            setError("No se pudo guardar el cambio.");
+            setSaving(false);
+        }
+    };
+
+    const handleRegeneratePanel = async () => {
+        if (!selectedPanel) return;
+        setRegenerating(true);
+        try {
+            // Primero aplicamos cambios por si acaso
+            await handleApplyChanges();
+
+            await axios.post(`${import.meta.env.VITE_API_URL}/panels/${selectedPanel.id}/regenerate/`);
+            startPollingStatus();
+        } catch (error) {
+            console.error("Error regenerating panel:", error);
+            setRegenerating(false);
+        }
+    };
+
+    const handleRegenerateMerge = async () => {
+        setRegenerating(true);
+        try {
+            await axios.post(`${import.meta.env.VITE_API_URL}/projects/${projectId}/regenerate-merge/`, {
+                instructions: mergeInstructions
+            });
+            startPollingStatus();
+        } catch (error) {
+            console.error("Error regenerating merge:", error);
+            setRegenerating(false);
+        }
+    };
+
+    const updateBalloon = (idx, field, value) => {
+        const newBalloons = [...editingBalloons];
+        newBalloons[idx] = { ...newBalloons[idx], [field]: value };
+        setEditingBalloons(newBalloons);
     };
 
     return (
@@ -188,6 +283,27 @@ function App() {
                     />
                 ) : (
                     <div className="flex flex-col gap-8 items-center w-full max-w-4xl">
+                        <div className="w-full bg-gray-900 rounded-2xl p-6 border border-purple-500/30 shadow-lg shadow-purple-500/5">
+                            <h3 className="text-sm font-bold text-purple-400 uppercase mb-4 flex items-center gap-2">
+                                <Wand2 size={16} />
+                                Configuración de Fusión Orgánica
+                            </h3>
+                            <textarea
+                                className="w-full bg-gray-950 border border-gray-800 rounded-xl p-4 text-sm text-gray-300 h-24 mb-4 focus:border-purple-500 outline-none transition"
+                                placeholder="Escribe instrucciones adicionales para la fusión (ej: 'Manten un estilo acuarela', 'Añade más oscuridad'...)"
+                                value={mergeInstructions}
+                                onChange={(e) => setMergeInstructions(e.target.value)}
+                            />
+                            <button
+                                onClick={handleRegenerateMerge}
+                                disabled={regenerating || loading}
+                                className="w-full py-3 bg-purple-600 hover:bg-purple-700 text-white font-bold rounded-xl text-sm transition shadow-lg hover:shadow-purple-500/20 flex items-center justify-center gap-2 disabled:bg-gray-800"
+                            >
+                                {regenerating ? <Loader2 size={18} className="animate-spin" /> : <RefreshCw size={18} />}
+                                {regenerating ? "Regenerando Fusión..." : "Regenerar Fusión Orgánica"}
+                            </button>
+                        </div>
+
                         {pages.map(page => (
                             <div key={page.page_number} className="w-full bg-gray-900 rounded-2xl p-4 border border-gray-800">
                                 <h3 className="text-xs font-bold text-gray-500 uppercase mb-4 px-2">Página {page.page_number} - Resultado Orgánico</h3>
@@ -221,35 +337,46 @@ function App() {
                                 Panel Inspector
                             </h2>
                             <span className="text-xs bg-gray-800 px-2 py-1 rounded text-gray-400">
-                                #{selectedPanel.id.slice(-4)}
+                                #{String(selectedPanel.id).slice(-4)}
                             </span>
                         </div>
 
                         <div className="space-y-6 flex-1 overflow-auto pr-1">
                             <div>
                                 <label className="text-xs font-bold text-gray-500 uppercase block mb-2">Descripción de Escena</label>
-                                <p className="text-sm text-gray-400 bg-gray-950/50 p-3 rounded-xl border border-gray-800">
-                                    {selectedPanel.scene_description || "Sin descripción disponible."}
-                                </p>
-                            </div>
-
-                            <div>
-                                <label className="text-xs font-bold text-gray-500 uppercase block mb-2">Visual Prompt</label>
                                 <textarea
-                                    className="w-full bg-gray-950 border border-gray-800 rounded-xl p-3 text-sm text-gray-300 h-24 resize-none focus:border-purple-500 outline-none"
-                                    value={selectedPanel.prompt}
-                                    readOnly
+                                    className="w-full bg-gray-950 border border-gray-800 rounded-xl p-3 text-sm text-gray-400 h-20 resize-none focus:border-purple-500 outline-none"
+                                    value={editingDescription}
+                                    onChange={(e) => setEditingDescription(e.target.value)}
                                 />
                             </div>
 
-                            {selectedPanel.balloons && selectedPanel.balloons.length > 0 && (
+                            <div>
+                                <label className="text-xs font-bold text-gray-500 uppercase block mb-2">Visual Prompt AI</label>
+                                <textarea
+                                    className="w-full bg-gray-950 border border-gray-800 rounded-xl p-3 text-sm text-gray-300 h-24 resize-none focus:border-purple-500 outline-none"
+                                    value={editingPrompt}
+                                    onChange={(e) => setEditingPrompt(e.target.value)}
+                                />
+                            </div>
+
+                            {editingBalloons && editingBalloons.length > 0 && (
                                 <div>
-                                    <label className="text-xs font-bold text-gray-500 uppercase block mb-2">Diálogos ({selectedPanel.balloons.length})</label>
-                                    <div className="space-y-2">
-                                        {selectedPanel.balloons.map((b, i) => (
-                                            <div key={i} className="text-xs p-2 bg-gray-800/30 rounded-lg border border-gray-800">
-                                                <span className="font-bold text-purple-400 mr-1">{b.character || 'Narrador'}:</span>
-                                                <span className="text-gray-400 italic">"{b.text}"</span>
+                                    <label className="text-xs font-bold text-gray-500 uppercase block mb-2">Diálogos ({editingBalloons.length})</label>
+                                    <div className="space-y-3">
+                                        {editingBalloons.map((b, i) => (
+                                            <div key={i} className="p-3 bg-gray-800/30 rounded-lg border border-gray-800 space-y-2">
+                                                <input
+                                                    className="w-full bg-transparent text-xs font-bold text-purple-400 outline-none border-b border-gray-700 pb-1"
+                                                    value={b.character || ''}
+                                                    placeholder="Personaje"
+                                                    onChange={(e) => updateBalloon(i, 'character', e.target.value)}
+                                                />
+                                                <textarea
+                                                    className="w-full bg-transparent text-xs text-gray-400 italic outline-none resize-none h-12"
+                                                    value={b.text}
+                                                    onChange={(e) => updateBalloon(i, 'text', e.target.value)}
+                                                />
                                             </div>
                                         ))}
                                     </div>
@@ -257,10 +384,14 @@ function App() {
                             )}
 
                             <div>
-                                <label className="text-xs font-bold text-gray-500 uppercase block mb-2">Acciones</label>
-                                <button className="w-full flex items-center justify-center gap-2 bg-gray-800 hover:bg-gray-700 text-sm font-semibold py-2.5 px-4 rounded-xl transition border border-gray-700">
-                                    <RefreshCw size={16} />
-                                    Regenerar Panel
+                                <label className="text-xs font-bold text-gray-500 uppercase block mb-2">Imagen</label>
+                                <button
+                                    onClick={handleRegeneratePanel}
+                                    disabled={regenerating || loading}
+                                    className="w-full flex items-center justify-center gap-2 bg-gray-800 hover:bg-gray-700 text-sm font-semibold py-2.5 px-4 rounded-xl transition border border-gray-700 disabled:bg-gray-900"
+                                >
+                                    {regenerating ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
+                                    Regenerar Imagen
                                 </button>
                             </div>
 
@@ -273,7 +404,12 @@ function App() {
                         </div>
 
                         <div className="mt-6 pt-6 border-t border-gray-800">
-                            <button className="w-full py-2.5 bg-white text-black font-bold rounded-xl text-sm hover:bg-gray-200 transition">
+                            <button
+                                onClick={handleApplyChanges}
+                                disabled={saving}
+                                className="w-full py-2.5 bg-white text-black font-bold rounded-xl text-sm hover:bg-gray-200 transition disabled:bg-gray-400 flex items-center justify-center gap-2"
+                            >
+                                {saving && <Loader2 size={16} className="animate-spin" />}
                                 Aplicar Cambios
                             </button>
                         </div>

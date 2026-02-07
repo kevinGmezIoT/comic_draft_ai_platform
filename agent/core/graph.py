@@ -144,12 +144,19 @@ def image_generator(state: AgentState):
     cm = CharacterManager(state["project_id"])
     
     updated_panels = []
-    # Aseguramos el orden para que la generación (si es secuencial/streaming) tenga sentido
-    sorted_panels = sorted(state["panels"], key=lambda x: (x['page_number'], x['order_in_page']))
+    # Aseguramos el orden para que la generación (si es secuencial/streaming)    # Ordenar por página y orden de forma defensiva
+    sorted_panels = sorted(state["panels"], key=lambda x: (x.get('page_number', 1), x.get('order_in_page', 0)))
     
     for panel in sorted_panels:
+        # Lógica de salto refinada: 
+        # Si tiene imagen y NO está pendiente de regenerar o editar, saltar.
+        # Esto ignora panels con status 'completed' (del backend) o 'generated'.
+        if panel.get("image_url") and panel.get("status") not in ["pending", "editing"]:
+            updated_panels.append(panel)
+            continue
+
         # Construir prompt robusto con consistencia
-        char_prompts = [cm.get_character_prompt_segment(c) for c in panel["characters"]]
+        char_prompts = [cm.get_character_prompt_segment(c) for c in panel.get("characters", [])]
         full_prompt = f"{panel['prompt']}. Estilo: {state['world_model_summary'][:200]}. " + " ".join(char_prompts)
         
         # Image-to-image si ya existe una versión previa (v2, edit)
@@ -214,10 +221,17 @@ def layout_designer(state: AgentState):
     return {"panels": updated_panels, "current_step": "generator"}
 
 def page_merger(state: AgentState):
-    print("--- ORGANIC PAGE MERGE (Image-to-Image) ---")
-    adapter = get_image_adapter()
+    print("--- ORGANIC PAGE MERGE (Image-to-Image with Composite & Balloons) ---")
+    from core.utils import PageRenderer
+    import os
+    import requests
+    from io import BytesIO
+    from PIL import Image
+    import tempfile
     
-    # Agrupar paneles por página
+    adapter = get_image_adapter()
+    renderer = PageRenderer()
+    
     pages = {}
     for p in state["panels"]:
         p_num = p["page_number"]
@@ -228,18 +242,39 @@ def page_merger(state: AgentState):
     
     for page_num, panel_list in pages.items():
         print(f"Merging Page {page_num}...")
-        # En una implementación real, aquí se crearía un collage de los panels
-        # y se pasaría como init_image al adaptador.
-        # Por ahora, simulamos el prompt de condensación orgánica.
+        
+        # 1. Crear el collage base con globos (como guía para la IA)
+        composite_path = renderer.create_composite_page(panel_list, include_balloons=True)
+        
         panel_descriptions = " | ".join([p["scene_description"] for p in panel_list])
-        merge_prompt = f"Comic book page layout, organic ink and painting merge of the following scenes: {panel_descriptions}. Estilo: {state['world_model_summary'][:200]}. Cinematic composition, professional comic layout."
+        merge_prompt = f"ORGANIC COMIC PAGE MERGE. Task: Synthesize these scenes and speech bubbles into a single, cohesive comic page. Blend the backgrounds smoothly. Keep the placements of characters and balloons. Style: {state.get('world_model_summary', '')}. Professional comic art style."
         
-        # Simulación de Image-to-Image / Organic Condensation
-        panel_refs = ", ".join([f"[Panel {p['id']}: {p['image_url']}]" for p in panel_list if p["image_url"]])
-        merge_prompt = f"ORGANIC COMIC PAGE MERGE. Reference Images: {panel_refs}. Task: Synthesize these scenes into a single, cohesive comic page. Blend the backgrounds and characters smoothly. Use overlapping panels and hand-drawn borders. Style: {state['world_model_summary'][:200]}. Cinematic layout, professional comic art."
-        
-        merged_url = adapter.generate_image(merge_prompt, quality="hd") 
-        merged_results.append({"page_number": page_num, "image_url": merged_url})
+        try:
+            # 2. Generar mezcla orgánica via Image-to-Image
+            raw_merged_url = adapter.generate_image(merge_prompt, quality="hd", init_image_path=composite_path) 
+            
+            # 3. Aplicar "Overlays" nítidos sobre el resultado de la IA
+            # (Descargamos el resultado de la IA para ponerle texto legible encima)
+            response = requests.get(raw_merged_url, timeout=15)
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp_raw:
+                tmp_raw.write(response.content)
+                tmp_raw_path = tmp_raw.name
+                
+            final_composite_path = renderer.apply_final_overlays(tmp_raw_path, panel_list)
+            
+            # Nota: En producción esto se subiría a S3. 
+            # Para el prototipo, devolvemos la URL de la IA (raw) por ahora 
+            # o simulamos que la final es la procesada (si el adapter manejara subida).
+            # Como el backend espera una URL, mantendremos raw_merged_url o coordinaremos.
+            # Sin embargo, para que el usuario vea el resultado con globos nítidos,
+            # lo ideal es que el Agente devuelva una URL accesible.
+            
+            merged_results.append({"page_number": page_num, "image_url": raw_merged_url})
+            print(f"DEBUG: Final sharp balloons ready at {final_composite_path} (local)")
+            
+        finally:
+            if os.path.exists(composite_path): os.remove(composite_path)
+            # if os.path.exists(tmp_raw_path): os.remove(tmp_raw_path)
         
     return {"merged_pages": merged_results, "current_step": "done"}
 

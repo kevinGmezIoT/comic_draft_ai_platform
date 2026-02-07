@@ -9,7 +9,6 @@ load_dotenv(override=True)
 app = Flask(__name__)
 CORS(app)
 
-from worker import generate_comic_async
 
 @app.route('/health', methods=['GET'])
 def health():
@@ -24,6 +23,7 @@ def generate_comic():
     max_panels = data.get("max_panels")
     layout_style = data.get("layout_style", "dynamic")
 
+    from worker import generate_comic_async
     # Disparar tarea asíncrona en Celery
     task = generate_comic_async.delay(project_id, sources, max_pages, max_panels, layout_style)
 
@@ -34,12 +34,33 @@ def generate_comic():
         "message": "Generation process started in background"
     }), 202
 
-@app.route('/edit-panel', methods=['POST'])
-def edit_panel():
-    # Lógica simplificada para editar un panel específico
+@app.route('/regenerate-panel', methods=['POST'])
+def regenerate_panel():
     data = request.json
-    # Implementar llamada al adaptador.edit_image()
-    return jsonify({"status": "processing", "message": "Inpainting not yet implemented in prototype"})
+    project_id = data.get("project_id")
+    panel_id = data.get("panel_id")
+    
+    from worker import regenerate_panel_async
+    task = regenerate_panel_async.delay(
+        project_id, 
+        panel_id,
+        data.get("prompt"),
+        data.get("scene_description"),
+        data.get("balloons")
+    )
+    
+    return jsonify({"project_id": project_id, "task_id": task.id, "status": "queued"}), 202
+
+@app.route('/regenerate-merge', methods=['POST'])
+def regenerate_merge():
+    data = request.json
+    project_id = data.get("project_id")
+    instructions = data.get("instructions", "")
+    
+    from worker import regenerate_merge_async
+    task = regenerate_merge_async.delay(project_id, instructions)
+    
+    return jsonify({"project_id": project_id, "task_id": task.id, "status": "queued"}), 202
 
 if __name__ == '__main__':
     port = int(os.getenv("PORT", 8001))

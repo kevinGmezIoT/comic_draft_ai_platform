@@ -22,6 +22,7 @@ dependencies = [
     "pypdf",
     "docx2txt",
     "tiktoken",
+    "pillow>=12.1.0",
 ]
 
 [tool.uv]

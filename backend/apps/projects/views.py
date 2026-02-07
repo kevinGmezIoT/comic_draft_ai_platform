@@ -92,37 +92,97 @@ class AgentCallbackView(APIView):
             project.last_error = None
             project.save()
             
-            # Limpiar versiones previas para este prototipo o manejar versionado
-            Page.objects.filter(project=project).delete()
-            
             # Organizar por páginas y paneles
             panels_data = result.get('panels', [])
             # Agrupar por página
-            pages = {}
+            pages_map = {}
             for p_data in panels_data:
                 p_num = p_data.get('page_number', 1)
-                if p_num not in pages:
-                    pages[p_num] = Page.objects.create(project=project, page_number=p_num)
+                if p_num not in pages_map:
+                    page, _ = Page.objects.get_or_create(project=project, page_number=p_num)
+                    pages_map[p_num] = page
                 
-                Panel.objects.create(
-                    page=pages[p_num],
+                # Intentar actualizar por 'order' o por ID si el agente lo mantiene
+                # Para este prototipo, usamos order + page como clave única de panel
+                Panel.objects.update_or_create(
+                    page=pages_map[p_num],
                     order=p_data.get('order_in_page', 0),
-                    prompt=p_data['prompt'],
-                    scene_description=p_data.get('scene_description', ''),
-                    image_url=p_data.get('image_url', ''),
-                    balloons=p_data.get('balloons', []),
-                    layout=p_data.get('layout', {}),
-                    status="completed"
+                    defaults={
+                        "prompt": p_data['prompt'],
+                        "scene_description": p_data.get('scene_description', ''),
+                        "image_url": p_data.get('image_url', ''),
+                        "balloons": p_data.get('balloons', []),
+                        "layout": p_data.get('layout', {}),
+                        "status": "completed"
+                    }
                 )
             
             # Guardar URLs de páginas fusionadas (Organic Merge)
             merged_pages_data = result.get('merged_pages', [])
             for m_data in merged_pages_data:
                 p_num = m_data.get('page_number')
-                if p_num in pages:
-                    pages[p_num].merged_image_url = m_data.get('image_url', '')
-                    pages[p_num].save()
+                page = Page.objects.filter(project=project, page_number=p_num).first()
+                if page:
+                    page.merged_image_url = m_data.get('image_url', '')
+                    page.save()
             
             return Response({"status": "received"}, status=status.HTTP_200_OK)
+        except Project.DoesNotExist:
+            return Response({"error": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+class UpdatePanelView(APIView):
+    """Actualiza campos de un panel específico"""
+    def patch(self, request, panel_id):
+        try:
+            panel = Panel.objects.get(id=panel_id)
+            panel.prompt = request.data.get('prompt', panel.prompt)
+            panel.scene_description = request.data.get('scene_description', panel.scene_description)
+            panel.balloons = request.data.get('balloons', panel.balloons)
+            panel.save()
+            return Response({"status": "updated", "id": panel.id}, status=status.HTTP_200_OK)
+        except Panel.DoesNotExist:
+            return Response({"error": "Panel not found"}, status=status.HTTP_404_NOT_FOUND)
+
+class RegeneratePanelView(APIView):
+    """Dispara la regeneración de la imagen de un panel"""
+    def post(self, request, panel_id):
+        try:
+            panel = Panel.objects.get(id=panel_id)
+            project = panel.page.project
+            
+            agent_url = f"{settings.AGENT_SERVICE_URL}/regenerate-panel"
+            payload = {
+                "project_id": str(project.id),
+                "panel_id": panel.id,
+                "prompt": panel.prompt,
+                "scene_description": panel.scene_description,
+                "balloons": panel.balloons
+            }
+            
+            project.status = "generating"
+            project.save()
+            
+            response = requests.post(agent_url, json=payload, timeout=10)
+            return Response(response.json(), status=status.HTTP_202_ACCEPTED)
+        except Panel.DoesNotExist:
+            return Response({"error": "Panel not found"}, status=status.HTTP_404_NOT_FOUND)
+
+class RegenerateMergedPagesView(APIView):
+    """Dispara la regeneración del organic merge de una página o proyecto"""
+    def post(self, request, project_id):
+        try:
+            project = Project.objects.get(id=project_id)
+            instructions = request.data.get('instructions', '')
+            
+            agent_url = f"{settings.AGENT_SERVICE_URL}/regenerate-merge"
+            payload = {
+                "project_id": str(project.id),
+                "instructions": instructions
+            }
+            
+            project.status = "generating"
+            project.save()
+            
+            response = requests.post(agent_url, json=payload, timeout=10)
+            return Response(response.json(), status=status.HTTP_202_ACCEPTED)
         except Project.DoesNotExist:
             return Response({"error": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
