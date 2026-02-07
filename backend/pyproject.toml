@@ -1,0 +1,21 @@
+[project]
+name = "comic-draft-backend"
+version = "0.1.0"
+description = "Backend Django para el borrador de cómics"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "django",
+    "djangorestframework",
+    "django-cors-headers",
+    "python-dotenv",
+    "requests",
+    "psycopg2-binary",
+    "whitenoise",
+    "dj-database-url",
+]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest-django",
+]

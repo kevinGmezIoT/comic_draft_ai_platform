@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 from core.graph import create_comic_graph
 import os
 
-load_dotenv()
+load_dotenv(override=True)
 
 app = Flask(__name__)
 CORS(app)

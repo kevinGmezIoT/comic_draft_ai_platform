@@ -4,7 +4,7 @@ from core.graph import create_comic_graph
 from dotenv import load_dotenv
 import requests
 
-load_dotenv()
+load_dotenv(override=True)
 
 # Configuración de Celery con Redis
 celery_app = Celery(

@@ -1,0 +1,30 @@
+[project]
+name = "comic-draft-agent"
+version = "0.1.0"
+description = "Agente de IA para el borrador de cómics"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "flask",
+    "flask-cors",
+    "python-dotenv",
+    "langchain",
+    "langchain-openai",
+    "langchain-community",
+    "langchain-text-splitters",
+    "langgraph",
+    "pydantic",
+    "requests",
+    "boto3",
+    "celery[redis]",
+    "redis",
+    "chromadb",
+    "pypdf",
+    "docx2txt",
+    "tiktoken",
+]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest",
+]

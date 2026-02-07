@@ -22,14 +22,16 @@ class GenerateComicView(APIView):
             "layout_style": request.data.get("layout_style", "dynamic")
         }
 
+        print(f"DEBUG: Enviando peticion al Agent en {agent_url}")
         try:
-            # Ahora la respuesta es inmediata (202 Accepted)
             project.status = "generating"
             project.last_error = None
             project.save()
             response = requests.post(agent_url, json=payload, timeout=10)
+            print(f"DEBUG: Agent response status: {response.status_code}")
             return Response(response.json(), status=status.HTTP_202_ACCEPTED)
         except requests.exceptions.RequestException as e:
+            print(f"ERROR: Fallo al conectar con el Agent: {str(e)}")
             return Response({"error": f"Agent service unavailable: {str(e)}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
 class ProjectDetailView(APIView):
