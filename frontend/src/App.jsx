@@ -63,6 +63,12 @@ function App() {
                 setPages(response.data.pages);
                 const allPanels = response.data.pages.flatMap(p => p.panels);
                 setPanels(allPanels);
+
+                // Sincronizar estados locales con los del proyecto guardado
+                if (response.data.max_pages) setMaxPages(response.data.max_pages);
+                if (response.data.max_panels) setMaxPanels(response.data.max_panels);
+                if (response.data.max_panels_per_page) setMaxPanelsPerPage(response.data.max_panels_per_page);
+                if (response.data.layout_style) setLayoutStyle(response.data.layout_style);
             }
         } catch (error) {
             console.error("Error fetching project:", error);
@@ -98,14 +104,12 @@ function App() {
             order_in_page: p.order,
             layout: p.layout,
             prompt: p.prompt,
-            scene_description: p.scene_description
+            scene_description: p.scene_description,
+            balloons: p.balloons || []
         }));
 
-        // If we are starting from scratch or regeneration, clear local state
-        if (!settings.skip_agent && !settings.skip_cleaning) {
-            setPanels([]);
-            setPages([]);
-        }
+        // Si tenemos paneles existentes y no estamos pidiendo limpieza total, los enviará al agente
+        const panelsToSync = (settings.skip_agent || settings.skip_cleaning) ? existingPanels : (panels.length > 0 ? existingPanels : []);
 
         // Synchronize local states with dashboard settings
         if (settings.max_pages) setMaxPages(settings.max_pages);
@@ -120,7 +124,7 @@ function App() {
             layout_style: settings.layout_style || layoutStyle,
             plan_only: settings.plan_only || false,
             page_number: settings.page_number,
-            panels: (settings.skip_agent || settings.skip_cleaning) ? existingPanels : []
+            panels: panelsToSync
         };
 
         try {
@@ -551,22 +555,57 @@ function App() {
                             </div>
 
                             <div>
-                                <label className="text-xs font-bold text-gray-500 uppercase block mb-2 tracking-widest">Prompt Visual AI</label>
-                                <textarea
-                                    className="w-full bg-gray-950 border border-purple-900/30 rounded-xl p-3 text-sm text-gray-200 h-24 resize-none outline-none focus:border-purple-500 transition-all shadow-inner"
-                                    value={editingPrompt}
-                                    onChange={(e) => setEditingPrompt(e.target.value)}
-                                />
+                                <label className="text-xs font-bold text-gray-500 uppercase block mb-3 tracking-widest">Globos de Diálogo</label>
+                                <div className="space-y-3 max-h-48 overflow-auto pr-2">
+                                    {editingBalloons.map((balloon, idx) => (
+                                        <div key={idx} className="bg-gray-950 border border-gray-800 rounded-xl p-3 space-y-2">
+                                            <div className="flex justify-between items-center">
+                                                <span className="text-[10px] font-bold text-purple-400 uppercase">{balloon.character || "NARRADOR"}</span>
+                                                <span className="text-[9px] text-gray-600 bg-gray-900 px-2 py-0.5 rounded">{balloon.type}</span>
+                                            </div>
+                                            <textarea
+                                                className="w-full bg-transparent text-xs text-gray-300 outline-none resize-none h-12"
+                                                value={balloon.text}
+                                                onChange={(e) => {
+                                                    const newBalloons = [...editingBalloons];
+                                                    newBalloons[idx] = { ...newBalloons[idx], text: e.target.value };
+                                                    setEditingBalloons(newBalloons);
+                                                }}
+                                            />
+                                        </div>
+                                    ))}
+                                    {editingBalloons.length === 0 && (
+                                        <p className="text-[10px] text-gray-600 italic text-center py-2">No hay globos en este panel.</p>
+                                    )}
+                                </div>
                             </div>
 
-                            <button className="w-full flex items-center justify-center gap-2 bg-gray-800 hover:bg-gray-700 text-xs font-bold py-3 rounded-xl transition border border-gray-700">
+                            <button
+                                onClick={() => handleGenerate({ panels: [{ ...selectedPanel, prompt: editingPrompt, scene_description: editingDescription, balloons: editingBalloons, status: 'pending' }], skip_cleaning: true })}
+                                className="w-full flex items-center justify-center gap-2 bg-gray-800 hover:bg-gray-700 text-xs font-bold py-3 rounded-xl transition border border-gray-700"
+                            >
                                 <RefreshCw size={14} />
                                 Regenerar Imagen
                             </button>
                         </div>
                         <div className="mt-6 pt-6 border-t border-gray-800">
-                            <button className="w-full py-3 bg-white text-black font-extrabold rounded-xl text-sm hover:bg-gray-200 transition active:scale-95">
-                                Aplicar Cambios al Arte
+                            <button
+                                onClick={async () => {
+                                    setSaving(true);
+                                    try {
+                                        await axios.patch(`${import.meta.env.VITE_API_URL}/panels/${selectedPanel.id}/`, {
+                                            prompt: editingPrompt,
+                                            scene_description: editingDescription,
+                                            balloons: editingBalloons
+                                        });
+                                        await fetchProjectData();
+                                        alert("Cambios guardados localmente. Regenera el 'Arte Final' para verlos mezclados.");
+                                    } catch (e) { console.error(e); } finally { setSaving(false); }
+                                }}
+                                disabled={saving}
+                                className="w-full py-3 bg-white text-black font-extrabold rounded-xl text-sm hover:bg-gray-200 transition active:scale-95 disabled:opacity-50"
+                            >
+                                {saving ? "Guardando..." : "Aplicar Cambios al Arte"}
                             </button>
                         </div>
                     </div>

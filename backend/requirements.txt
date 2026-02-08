@@ -6,3 +6,5 @@ requests
 psycopg2-binary
 whitenoise
 dj-database-url
+django-storages
+boto3

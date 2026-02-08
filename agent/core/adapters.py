@@ -9,39 +9,92 @@ class ImageModelAdapter(ABC):
         """Generates an image and returns the URL or S3 path. init_image_path used for i2i."""
         pass
 
-    @abstractmethod
     def edit_image(self, original_image_url: str, prompt: str, mask_url: str = None) -> str:
-        """Edits an existing image (Inpainting/Outpainting)"""
-        pass
+        """Edits an existing image (Inpainting/Outpainting/Variation)"""
+        import tempfile
+        import boto3
+        import requests
+        
+        # 1. Obtener la imagen original (URL o S3 Key)
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
+        tmp_path = tmp.name
+        tmp.close() # Cierra el handle para Windows
+        
+        try:
+            if original_image_url.startswith('http'):
+                r = requests.get(original_image_url)
+                with open(tmp_path, "wb") as f:
+                    f.write(r.content)
+            else:
+                s3 = boto3.client("s3")
+                bucket = os.getenv("AWS_STORAGE_BUCKET_NAME")
+                s3.download_fileobj(bucket, original_image_url, tmp_path)
+        
+            # 2. Llamar a la implementación específica de cada modelo pasando el path local
+            return self.generate_image(prompt, init_image_path=tmp_path)
+        finally:
+            if os.path.exists(tmp_path):
+                try: os.remove(tmp_path)
+                except: pass
+
+    def _upload_to_s3(self, image_data: bytes, extension: str = "png") -> str:
+        """Sube bytes a S3 y retorna la clave (o URL)"""
+        import uuid
+        import boto3
+        
+        s3 = boto3.client(
+            "s3",
+            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+            region_name=os.getenv("AWS_REGION")
+        )
+        bucket = os.getenv("AWS_STORAGE_BUCKET_NAME")
+        key = f"generated/{uuid.uuid4()}.{extension}"
+        
+        s3.put_object(Bucket=bucket, Key=key, Body=image_data, ContentType=f"image/{extension}")
+        # Retornamos la clave o URL según conveniencia. El backend espera algo que pueda guardar en ImageField.
+        # En AWS S3 con django-storages, guardar la 'key' suele ser suficiente si el bucket es el mismo.
+        return key
 
 class OpenAIAdapter(ImageModelAdapter):
     def __init__(self):
         self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
     def generate_image(self, prompt: str, aspect_ratio: str = "1:1", init_image_path: str = None, **kwargs) -> str:
+        import requests
+        
+        # Mapear aspect ratio a dimensiones de DALL-E 3
+        size = "1024x1024"
+        if aspect_ratio == "16:9":
+            size = "1792x1024"
+        elif aspect_ratio == "9:16":
+            size = "1024x1792"
+
         if init_image_path:
-            # DALL-E 2 soporta variaciones, DALL-E 3 no directamente vía API clásica de variaciones.
-            # Para propósitos de este prototipo, si hay init_image usamos el endpoint de variaciones (v2)
-            # O edit si es más apropiado.
+            # Variations always 1024x1024 in OpenAI API currently
             with open(init_image_path, "rb") as image_file:
                 response = self.client.images.create_variation(
                     image=image_file,
                     n=1,
                     size="1024x1024"
                 )
-            return response.data[0].url
+            url = response.data[0].url
+        else:
+            response = self.client.images.generate(
+                model="dall-e-3",
+                prompt=prompt,
+                n=1,
+                size=size,
+                quality="hd" # Forzamos HD para mejores resultados multimodales
+            )
+            url = response.data[0].url
         
-        response = self.client.images.generate(
-            model="dall-e-3",
-            prompt=prompt,
-            n=1,
-            size="1024x1024"
-        )
-        return response.data[0].url
+        # Descargar y subir a S3 para persistencia
+        img_data = requests.get(url).content
+        return self._upload_to_s3(img_data)
 
     def edit_image(self, original_image_url: str, prompt: str, mask_url: str = None) -> str:
-        # Lógica para DALL-E edit
-        pass
+        return super().edit_image(original_image_url, prompt, mask_url)
 
 class BedrockTitanAdapter(ImageModelAdapter):
     def __init__(self):
@@ -61,7 +114,7 @@ class BedrockTitanAdapter(ImageModelAdapter):
                 image_params = {
                     "text": prompt,
                     "conditionImage": img_base64,
-                    "similarityScore": 0.7 # Balance entre original y libertad creativa
+                    "similarityScore": 0.7
                 }
 
         body = json.dumps({
@@ -86,12 +139,12 @@ class BedrockTitanAdapter(ImageModelAdapter):
 
         response_body = json.loads(response.get("body").read())
         base64_image = response_body.get("images")[0]
+        image_bytes = base64.b64decode(base64_image)
         
-        return f"data:image/png;base64,{base64_image}"
+        return self._upload_to_s3(image_bytes)
 
     def edit_image(self, original_image_url: str, prompt: str, mask_url: str = None) -> str:
-        # Implementar Inpainting/Outpainting con Titan
-        pass
+        return super().edit_image(original_image_url, prompt, mask_url)
 
 def get_image_adapter() -> ImageModelAdapter:
     provider = os.getenv("IMAGE_GEN_PROVIDER", "openai").lower()

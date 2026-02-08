@@ -13,6 +13,9 @@ dependencies = [
     "psycopg2-binary",
     "whitenoise",
     "dj-database-url",
+    "django-storages>=1.14.6",
+    "boto3>=1.42.44",
+    "pillow>=12.1.0",
 ]
 
 [tool.uv]

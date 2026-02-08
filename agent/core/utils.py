@@ -1,9 +1,9 @@
-import requests
 from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
 import os
 import tempfile
 import textwrap
+import boto3
 
 class PageRenderer:
     def __init__(self, page_width=1024, page_height=1536):
@@ -25,8 +25,29 @@ class PageRenderer:
                 continue
                 
             try:
-                response = requests.get(image_url, timeout=10)
-                panel_img = Image.open(BytesIO(response.content))
+                if image_url.startswith('http'):
+                    import requests
+                    response = requests.get(image_url, timeout=10)
+                    panel_img = Image.open(BytesIO(response.content))
+                else:
+                    # Asumimos que es una llave de S3 (ej: generated/uuid.png)
+                    s3 = boto3.client(
+                        "s3",
+                        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+                        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+                        region_name=os.getenv("AWS_REGION")
+                    )
+                    bucket = os.getenv("AWS_STORAGE_BUCKET_NAME")
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp_img:
+                        tmp_img_path = tmp_img.name
+                        tmp_img.close() # Cierra el handle ANTES de descargar con s3.download_file
+                        s3.download_file(bucket, image_url, tmp_img_path)
+                    
+                    with Image.open(tmp_img_path) as img:
+                        panel_img = img.copy() # Copia a memoria para cerrar el archivo inmediatamente
+                    
+                    try: os.remove(tmp_img_path) # Limpiar temporal local
+                    except: pass
                 
                 x = int((layout['x'] / 100) * self.page_width)
                 y = int((layout['y'] / 100) * self.page_height)
@@ -43,8 +64,16 @@ class PageRenderer:
                 print(f"Error rendering panel {panel.get('id')}: {e}")
                 
         tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
-        canvas.save(tmp_file.name)
-        return tmp_file.name
+        tmp_path = tmp_file.name
+        tmp_file.close() # Cierra el handle para que Windows no lo bloquee
+        
+        try:
+            canvas.save(tmp_path)
+            return tmp_path
+        except Exception as e:
+            print(f"Error saving composite: {e}")
+            if os.path.exists(tmp_path): os.remove(tmp_path)
+            raise e
 
     def draw_panel_balloons(self, canvas, panel, panel_rect):
         """Dibuja los globos de un panel específico sobre el lienzo"""
@@ -115,19 +144,23 @@ class PageRenderer:
 
     def apply_final_overlays(self, base_image_path, panels):
         """Toma la imagen generada por IA y aplica los globos nítidos encima"""
-        img = Image.open(base_image_path).convert("RGB")
-        
-        for panel in panels:
-            layout = panel.get('layout')
-            if not layout: continue
+        # Usar with para asegurar el cierre de la imagen original
+        with Image.open(base_image_path) as img:
+            img = img.convert("RGB")
             
-            x = int((layout['x'] / 100) * self.page_width)
-            y = int((layout['y'] / 100) * self.page_height)
-            w = int((layout['w'] / 100) * self.page_width)
-            h = int((layout['h'] / 100) * self.page_height)
-            
-            self.draw_panel_balloons(img, panel, (x, y, w, h))
-            
-        tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
-        img.save(tmp_file.name)
-        return tmp_file.name
+            for panel in panels:
+                layout = panel.get('layout')
+                if not layout: continue
+                
+                x = int((layout['x'] / 100) * self.page_width)
+                y = int((layout['y'] / 100) * self.page_height)
+                w = int((layout['w'] / 100) * self.page_width)
+                h = int((layout['h'] / 100) * self.page_height)
+                
+                self.draw_panel_balloons(img, panel, (x, y, w, h))
+                
+            tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
+            tmp_path = tmp_file.name
+            tmp_file.close()
+            img.save(tmp_path)
+            return tmp_path

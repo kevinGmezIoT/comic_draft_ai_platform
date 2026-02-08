@@ -79,9 +79,21 @@ class GenerateComicView(APIView):
 
         # Enviar a cola del Agente (Solo para generación de arte real)
         agent_url = f"{settings.AGENT_SERVICE_URL}/generate"
+        # Obtener archivos fuente reales (Guión de las notas del proyecto)
+        from .models import ProjectNote
+        script_note = project.notes.filter(note_type="script").first()
+        sources = []
+        if script_note and script_note.file:
+            # Si usamos S3, .url nos da la URL completa (puede ser presigned)
+            # El Agente puede manejar URLs de S3 directamente si tiene permisos o si la URL es pública/presigned
+            sources.append(script_note.file.url)
+        else:
+            # Fallback por si no hay archivo, pero ya no es hardcoded a un bucket fijo ajeno
+            sources = state_sources if (state_sources := request.data.get("sources")) else []
+
         payload = {
             "project_id": str(project.id),
-            "sources": ["s3://comic-draft/sources/guion.pdf"], # Simulación
+            "sources": sources,
             "max_pages": request.data.get("max_pages", 3),
             "max_panels": request.data.get("max_panels"),
             "max_panels_per_page": request.data.get("max_panels_per_page", 4),
@@ -94,12 +106,14 @@ class GenerateComicView(APIView):
                 "characters": [{
                     "name": c.name,
                     "description": c.description,
-                    "metadata": c.metadata
+                    "metadata": c.metadata,
+                    "image_url": c.image_url
                 } for c in project.characters.all()],
                 "sceneries": [{
                     "name": s.name,
                     "description": s.description,
-                    "metadata": s.metadata
+                    "metadata": s.metadata,
+                    "image_url": s.image_url
                 } for s in project.sceneries.all()]
             }
         }
@@ -205,25 +219,53 @@ class AgentCallbackView(APIView):
 
             # Agrupar por página
             pages_map = {}
+            processed_panel_ids = []
+            
             for p_data in panels_data:
                 p_num = p_data.get('page_number', 1)
                 if p_num not in pages_map:
                     page, _ = Page.objects.get_or_create(project=project, page_number=p_num)
                     pages_map[p_num] = page
                 
-                # Para este prototipo, usamos order + page como clave única de panel
-                Panel.objects.update_or_create(
-                    page=pages_map[p_num],
-                    order=p_data.get('order_in_page', 0),
-                    defaults={
-                        "prompt": p_data['prompt'],
-                        "scene_description": p_data.get('scene_description', ''),
-                        "image_url": p_data.get('image_url', ''),
-                        "balloons": p_data.get('balloons', []),
-                        "layout": p_data.get('layout', {}),
-                        "status": "completed"
-                    }
-                )
+                # Sincronización robusta: Intentar por ID si existe, sino por orden en página
+                panel_id = p_data.get('id')
+                panel = None
+                
+                if panel_id and len(str(panel_id)) > 30: # Es un UUID probable
+                    panel = Panel.objects.filter(id=panel_id).first()
+                
+                if not panel:
+                    panel, created = Panel.objects.update_or_create(
+                        page=pages_map[p_num],
+                        order=p_data.get('order_in_page', 0),
+                        defaults={
+                            "prompt": p_data['prompt'],
+                            "scene_description": p_data.get('scene_description', ''),
+                            "balloons": p_data.get('balloons', []),
+                            "layout": p_data.get('layout', {}),
+                            "status": "completed"
+                        }
+                    )
+                else:
+                    # Actualizar existente
+                    panel.prompt = p_data['prompt']
+                    panel.scene_description = p_data.get('scene_description', '')
+                    panel.balloons = p_data.get('balloons', [])
+                    panel.layout = p_data.get('layout', {})
+                    panel.status = "completed"
+                    panel.order = p_data.get('order_in_page', panel.order)
+                    panel.save()
+                
+                processed_panel_ids.append(panel.id)
+                
+                if p_data.get('image_url'):
+                    panel.image.name = p_data['image_url']
+                    panel.save()
+
+            # RECONCILIACIÓN: Eliminar paneles que el agente ya no reporta (si estamos en modo regeneración total o parcial)
+            # Solo eliminamos de las páginas que el agente tocó
+            for p_num, page in pages_map.items():
+                page.panels.exclude(id__in=processed_panel_ids).delete()
             
             # Guardar URLs de páginas fusionadas (Organic Merge)
             merged_pages_data = result.get('merged_pages', [])
@@ -231,7 +273,9 @@ class AgentCallbackView(APIView):
                 p_num = m_data.get('page_number')
                 page = Page.objects.filter(project=project, page_number=p_num).first()
                 if page:
-                    page.merged_image_url = m_data.get('image_url', '')
+                    image_url = m_data.get('image_url', '')
+                    if image_url:
+                        page.merged_image.name = image_url
                     page.save()
 
             # FINALMENTE marcar como completado después de salvar todo
@@ -260,8 +304,23 @@ class CreateProjectView(APIView):
         
         project = Project.objects.create(
             name=name,
-            description=request.data.get('description', '')
+            description=request.data.get('description', ''),
+            world_bible=request.data.get('world_bible', ''),
+            style_guide=request.data.get('style_guide', '')
         )
+
+        # Si viene un archivo de guión, crearlo como nota
+        script_file = request.FILES.get('script_file')
+        if script_file:
+            from .models import ProjectNote
+            note = ProjectNote.objects.create(
+                project=project,
+                title="Guión Original",
+                file=script_file,
+                note_type="script"
+            )
+            print(f"DEBUG S3: Guión subido correctamente. URL: {note.file.url}")
+
         return Response({"id": project.id, "name": project.name}, status=status.HTTP_201_CREATED)
 
 class CharacterListView(APIView):
@@ -294,7 +353,8 @@ class CharacterDetailView(APIView):
             c.name = request.data.get('name', c.name)
             c.description = request.data.get('description', c.description)
             c.metadata = request.data.get('metadata', c.metadata)
-            c.image_url = request.data.get('image_url', c.image_url)
+            if 'image_url' in request.data:
+                c.image.name = request.data.get('image_url')
             c.save()
             return Response({"status": "updated"})
         except Character.DoesNotExist:
@@ -317,8 +377,17 @@ class CharacterCreateView(APIView):
                 name=request.data.get('name'),
                 description=request.data.get('description', ''),
                 metadata=request.data.get('metadata', {}),
-                image_url=request.data.get('image_url', '')
             )
+            image_file = request.FILES.get('image')
+            if image_file:
+                character.image = image_file
+                print(f"DEBUG S3: Subiendo imagen de personaje '{character.name}'...")
+            elif request.data.get('image_url'):
+                character.image.name = request.data.get('image_url')
+            
+            character.save()
+            if image_file:
+                print(f"DEBUG S3: Imagen de personaje subida. URL: {character.image.url}")
             return Response({"id": character.id}, status=status.HTTP_201_CREATED)
         except Project.DoesNotExist:
             return Response({"error": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
@@ -353,7 +422,8 @@ class SceneryDetailView(APIView):
             s.name = request.data.get('name', s.name)
             s.description = request.data.get('description', s.description)
             s.metadata = request.data.get('metadata', s.metadata)
-            s.image_url = request.data.get('image_url', s.image_url)
+            if 'image_url' in request.data:
+                s.image.name = request.data.get('image_url')
             s.save()
             return Response({"status": "updated"})
         except Scenery.DoesNotExist:
@@ -376,8 +446,17 @@ class SceneryCreateView(APIView):
                 name=request.data.get('name'),
                 description=request.data.get('description', ''),
                 metadata=request.data.get('metadata', {}),
-                image_url=request.data.get('image_url', '')
             )
+            image_file = request.FILES.get('image')
+            if image_file:
+                scenery.image = image_file
+                print(f"DEBUG S3: Subiendo imagen de escenario '{scenery.name}'...")
+            elif request.data.get('image_url'):
+                scenery.image.name = request.data.get('image_url')
+            
+            scenery.save()
+            if image_file:
+                print(f"DEBUG S3: Imagen de escenario subida. URL: {scenery.image.url}")
             return Response({"id": scenery.id}, status=status.HTTP_201_CREATED)
         except Project.DoesNotExist:
             return Response({"error": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
@@ -447,10 +526,13 @@ class ProjectNoteView(APIView):
                 project=project,
                 title=request.data.get('title'),
                 content=request.data.get('content', ''),
-                file_url=request.data.get('file_url', ''),
-                file_path=request.data.get('file_path', ''),
                 note_type=request.data.get('note_type', 'general')
             )
+            if request.data.get('file_url'):
+                note.file.name = request.data.get('file_url')
+            elif request.data.get('file_path'):
+                 note.file.name = request.data.get('file_path')
+            note.save()
             return Response({"id": str(note.id)}, status=status.HTTP_201_CREATED)
         except Project.DoesNotExist:
             return Response({"error": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
@@ -461,8 +543,10 @@ class ProjectNoteDetailView(APIView):
             note = ProjectNote.objects.get(id=note_id)
             note.title = request.data.get('title', note.title)
             note.content = request.data.get('content', note.content)
-            note.file_url = request.data.get('file_url', note.file_url)
-            note.file_path = request.data.get('file_path', note.file_path)
+            if 'file_url' in request.data:
+                note.file.name = request.data.get('file_url')
+            elif 'file_path' in request.data:
+                note.file.name = request.data.get('file_path')
             note.note_type = request.data.get('note_type', note.note_type)
             note.save()
             return Response({"status": "updated"})

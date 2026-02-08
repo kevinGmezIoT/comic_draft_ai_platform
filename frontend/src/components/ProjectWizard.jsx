@@ -27,30 +27,46 @@ const ProjectWizard = ({ onComplete }) => {
     const handleCreateProject = async () => {
         setLoading(true);
         try {
-            // 1. Create Project
-            const projectRes = await axios.post(`${import.meta.env.VITE_API_URL}/projects/`, {
-                name: projectData.name,
-                description: projectData.description,
-                world_bible: projectData.worldBible,
-                style_guide: projectData.styleGuide
+            // 1. Create Project with Script File
+            const formData = new FormData();
+            formData.append('name', projectData.name);
+            formData.append('description', projectData.description);
+            formData.append('world_bible', projectData.worldBible);
+            formData.append('style_guide', projectData.styleGuide);
+            if (projectData.scriptFile) {
+                formData.append('script_file', projectData.scriptFile);
+            }
+
+            const projectRes = await axios.post(`${import.meta.env.VITE_API_URL}/projects/`, formData, {
+                headers: { 'Content-Type': 'multipart/form-data' }
             });
             const projectId = projectRes.data.id;
 
-            // 2. Create Characters
+            // 2. Create Characters with images
             for (const char of projectData.characters) {
-                await axios.post(`${import.meta.env.VITE_API_URL}/projects/${projectId}/characters/create/`, {
-                    name: char.name,
-                    description: char.description,
-                    metadata: { file_name: char.file ? char.file.name : null }
+                const charData = new FormData();
+                charData.append('name', char.name);
+                charData.append('description', char.description);
+                if (char.file) {
+                    charData.append('image', char.file);
+                }
+
+                await axios.post(`${import.meta.env.VITE_API_URL}/projects/${projectId}/characters/create/`, charData, {
+                    headers: { 'Content-Type': 'multipart/form-data' }
                 });
             }
 
-            // 3. Create Sceneries
+            // 3. Create Sceneries with images
             for (const scene of projectData.sceneries) {
-                await axios.post(`${import.meta.env.VITE_API_URL}/projects/${projectId}/sceneries/create/`, {
-                    name: scene.name,
-                    description: scene.description,
-                    metadata: { file_name: scene.file ? scene.file.name : null }
+                const sceneData = new FormData();
+                sceneData.append('name', scene.name);
+                sceneData.append('description', scene.description);
+                if (scene.file) {
+                    sceneData.append('image', scene.file);
+                }
+
+                await axios.post(`${import.meta.env.VITE_API_URL}/projects/${projectId}/sceneries/create/`, sceneData, {
+                    headers: { 'Content-Type': 'multipart/form-data' }
                 });
             }
 

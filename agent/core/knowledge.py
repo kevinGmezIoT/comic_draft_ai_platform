@@ -11,25 +11,76 @@ class KnowledgeManager:
         self.embeddings = OpenAIEmbeddings()
         self.text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
 
+    def _download_from_s3(self, s3_url: str):
+        """Descarga un archivo de S3 a un directorio temporal y retorna la ruta local"""
+        import boto3
+        from urllib.parse import urlparse
+        
+        parsed = urlparse(s3_url)
+        bucket = parsed.netloc
+        key = parsed.path.lstrip('/')
+        
+        s3 = boto3.client(
+            "s3",
+            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+            region_name=os.getenv("AWS_REGION")
+        )
+        
+        temp_dir = "./data/temp_downloads"
+        os.makedirs(temp_dir, exist_ok=True)
+        local_path = os.path.join(temp_dir, os.path.basename(key))
+        
+        print(f"Downloading {s3_url} to {local_path}...")
+        s3.download_file(bucket, key, local_path)
+        return local_path
+
     def ingest_from_urls(self, file_urls: list):
         """Descarga e ingesta archivos desde S3/URLs"""
         documents = []
         for url in file_urls:
             try:
-                # Si es una ruta simulada de S3 o archivo inexistente, evitamos la carga física
-                if url.startswith("s3://") or not os.path.exists(url):
-                    print(f"Simulando o saltando ingesta física de: {url}")
+                if url.startswith("s3://"):
+                    local_url = self._download_from_s3(url)
+                elif url.startswith("http"):
+                    import requests
+                    from urllib.parse import urlparse
+                    
+                    parsed = urlparse(url)
+                    filename = os.path.basename(parsed.path) or "downloaded_file"
+                    temp_dir = "./data/temp_downloads"
+                    os.makedirs(temp_dir, exist_ok=True)
+                    local_url = os.path.join(temp_dir, filename)
+                    
+                    print(f"Downloading HTTP URL: {url} -> {local_url}")
+                    r = requests.get(url, stream=True)
+                    with open(local_url, 'wb') as f:
+                        for chunk in r.iter_content(chunk_size=8192):
+                            f.write(chunk)
+                elif not os.path.exists(url):
+                    # Si no es URL ni existe localmente, posiblemente es un path relativo que debió ser de S3
+                    if url.startswith('/'):
+                        print(f"ALERTA: Recibido path relativo '{url}'. Verifique la configuración de S3 en el Backend.")
+                    else:
+                        print(f"Archivo local no encontrado: {url}")
                     continue
-
-                ext = url.split('.')[-1].lower()
-                if ext == 'pdf':
-                    loader = PyPDFLoader(url)
-                elif ext == 'docx':
-                    loader = Docx2txtLoader(url)
                 else:
-                    loader = TextLoader(url)
+                    local_url = url
+
+                ext = local_url.split('.')[-1].lower()
+                if ext == 'pdf':
+                    loader = PyPDFLoader(local_url)
+                elif ext == 'docx':
+                    loader = Docx2txtLoader(local_url)
+                else:
+                    loader = TextLoader(local_url, encoding='utf-8')
                 
                 documents.extend(loader.load())
+                
+                # Opcional: limpiar temporales si se descargaron de S3
+                # if url.startswith("s3://") and os.path.exists(local_url):
+                #    os.remove(local_url)
+
             except Exception as e:
                 print(f"Error cargando {url}: {e}. Se ignorará este archivo.")
 
