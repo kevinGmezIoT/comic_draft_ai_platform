@@ -36,7 +36,7 @@ cd agent
 # Terminal 1: API
 python app.py
 # Terminal 2: Worker
-celery -A worker.celery_app worker --loglevel=info
+celery -A worker.celery_app worker --pool=solo --loglevel=info
 ```
 
 ### 2. Backend (Django)

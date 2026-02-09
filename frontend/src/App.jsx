@@ -64,11 +64,14 @@ function App() {
                 const allPanels = response.data.pages.flatMap(p => p.panels);
                 setPanels(allPanels);
 
-                // Sincronizar estados locales con los del proyecto guardado
-                if (response.data.max_pages) setMaxPages(response.data.max_pages);
-                if (response.data.max_panels) setMaxPanels(response.data.max_panels);
-                if (response.data.max_panels_per_page) setMaxPanelsPerPage(response.data.max_panels_per_page);
-                if (response.data.layout_style) setLayoutStyle(response.data.layout_style);
+                // Priorizar estados oficiales del backend
+                const backendMaxPages = response.data.max_pages || response.data.pages.length || 3;
+                const backendMaxPanels = response.data.max_panels || allPanels.length || 6;
+                const actualMaxPanelsPerPage = response.data.pages.reduce((max, p) => Math.max(max, p.panels.length), 0) || maxPanelsPerPage;
+                setMaxPages(backendMaxPages);
+                setMaxPanels(backendMaxPanels);
+                setMaxPanelsPerPage(actualMaxPanelsPerPage);
+                setLayoutStyle(response.data.layout_style || 'dynamic');
             }
         } catch (error) {
             console.error("Error fetching project:", error);
@@ -108,24 +111,41 @@ function App() {
             balloons: p.balloons || []
         }));
 
-        // Si tenemos paneles existentes y no estamos pidiendo limpieza total, los enviará al agente
-        const panelsToSync = (settings.skip_agent || settings.skip_cleaning) ? existingPanels : (panels.length > 0 ? existingPanels : []);
+        // Siempre intentamos sincronizar los paneles existentes si los hay, 
+        // para que el agente reconozca IDs de paneles ya creados y mantenga sus layouts.
+        const panelsToSync = (panels.length > 0) ? existingPanels : [];
 
-        // Synchronize local states with dashboard settings
-        if (settings.max_pages) setMaxPages(settings.max_pages);
-        if (settings.max_panels) setMaxPanels(settings.max_panels);
-        if (settings.max_panels_per_page) setMaxPanelsPerPage(settings.max_panels_per_page);
-        if (settings.layout_style) setLayoutStyle(settings.layout_style);
+        console.log("DEBUG: [FRONTEND] Settings State - Pages:", maxPages, "PanelsPerPage:", maxPanelsPerPage, "LayoutStyle:", layoutStyle);
+
+        // Si estamos regenerando una página específica, el max_panels del payload 
+        // debería representar el total esperado tras el cambio, o simplemente le pasamos
+        const currentMaxPages = settings.max_pages || maxPages;
+        const requestedPanels = settings.panels_per_page || maxPanelsPerPage;
+
+        // El "techo" del proyecto: el mayor entre lo pedido y lo que ya existe en otras páginas
+        const actualPanelsInOtherPages = pages
+            .filter(p => p.page_number !== settings.page_number)
+            .reduce((max, p) => Math.max(max, p.panels.length), 0);
+        const projectDensity = Math.max(requestedPanels, actualPanelsInOtherPages);
+
+        // Calcular el total de paneles sumando lo que se queda + lo que se va a crear
+        const currentMaxPanels = settings.page_number
+            ? (panels.filter(p => p.page_number !== settings.page_number).length + requestedPanels)
+            : (currentMaxPages * requestedPanels);
+
+        console.log("DEBUG: [FRONTEND] Settings State - Project Density:", projectDensity, "Target Panels for this Page:", requestedPanels, "Total Max Panels:", currentMaxPanels);
 
         const config = {
-            max_pages: settings.max_pages || maxPages,
-            max_panels: settings.max_panels || maxPanels,
-            max_panels_per_page: settings.max_panels_per_page || maxPanelsPerPage,
+            max_pages: currentMaxPages,
+            max_panels: currentMaxPanels,
+            panels_per_page: requestedPanels, // ESTE es el que usa el backend para el bucle de creación
             layout_style: settings.layout_style || layoutStyle,
             plan_only: settings.plan_only || false,
             page_number: settings.page_number,
             panels: panelsToSync
         };
+
+        console.log("DEBUG: [FRONTEND] Generating with Config:", config);
 
         try {
             // Switch to editor immediately
@@ -511,6 +531,39 @@ function App() {
                     )
                 ) : (
                     <div className="flex flex-col gap-8 items-center w-full max-w-4xl">
+                        {/* Formulario de Instrucciones Image-to-Image */}
+                        <div className="w-full bg-gray-900 rounded-2xl p-6 border border-purple-500/30 shadow-2xl space-y-4">
+                            <h3 className="text-sm font-black text-purple-400 uppercase tracking-tighter flex items-center gap-2">
+                                <Wand2 size={16} />
+                                Instrucciones de Fusión Orgánica (Image-to-Image)
+                            </h3>
+                            <textarea
+                                className="w-full bg-gray-950 border border-gray-800 rounded-xl p-4 text-sm text-gray-300 h-24 resize-none outline-none focus:border-purple-500 transition-all shadow-inner"
+                                placeholder="Ej: Haz que los fondos se mezclen con un estilo de acuarela cyber-noir, suaviza las transiciones entre paneles..."
+                                value={mergeInstructions}
+                                onChange={(e) => setMergeInstructions(e.target.value)}
+                            />
+                            <button
+                                onClick={async () => {
+                                    setRegenerating(true);
+                                    try {
+                                        await axios.post(`${import.meta.env.VITE_API_URL}/projects/${projectId}/regenerate-merge/`, {
+                                            instructions: mergeInstructions
+                                        });
+                                        startPollingStatus();
+                                    } catch (e) {
+                                        console.error(e);
+                                        setRegenerating(false);
+                                    }
+                                }}
+                                disabled={regenerating}
+                                className="w-full flex items-center justify-center gap-3 bg-purple-600 hover:bg-purple-500 disabled:bg-gray-800 text-white font-black py-3 rounded-xl transition-all shadow-lg active:scale-95"
+                            >
+                                {regenerating ? <Loader2 className="animate-spin" /> : <RefreshCw size={18} />}
+                                {regenerating ? "Procesando Fusión..." : "Regenerar Fusión Orgánica"}
+                            </button>
+                        </div>
+
                         {pages.map(page => (
                             <div key={page.page_number} className="w-full bg-gray-900 rounded-2xl p-4 border border-gray-800 shadow-2xl">
                                 <h3 className="text-xs font-black text-gray-500 uppercase mb-4 px-2 tracking-tighter">Página {page.page_number} - Arte Fusionado</h3>

@@ -14,9 +14,25 @@ const ProjectDashboard = ({ projectId, onStartGeneration }) => {
     const [isLayoutModalOpen, setIsLayoutModalOpen] = useState(false);
     const [layoutSettings, setLayoutSettings] = useState({
         max_pages: 3,
-        max_panels_per_page: 4,
+        max_panels: 6,
+        panels_per_page: 6,
         layout_style: 'dynamic'
     });
+
+    // Synchronize layout settings with project data when available
+    useEffect(() => {
+        if (project) {
+            const allPanels = project.pages?.flatMap(p => p.panels) || [];
+            const actualMaxPanelsPerPage = project.pages?.reduce((max, p) => Math.max(max, p.panels.length), 0) || 4;
+
+            setLayoutSettings({
+                max_pages: project.max_pages || project.pages?.length || 3,
+                max_panels: project.max_panels || allPanels.length || 6,
+                panels_per_page: actualMaxPanelsPerPage,
+                layout_style: project.layout_style || 'dynamic'
+            });
+        }
+    }, [project]);
 
     // Modal state
     const [modal, setModal] = useState({ open: false, type: '', data: null }); // type: 'char' | 'scene' | 'note'
@@ -366,27 +382,17 @@ const ProjectDashboard = ({ projectId, onStartGeneration }) => {
                                 />
                             </div>
 
-                            <div className="grid grid-cols-2 gap-4">
+                            <div className="grid grid-cols-1 gap-4">
                                 <div>
                                     <label className="block text-[10px] font-bold text-gray-500 mb-3 uppercase tracking-widest">Paneles por Página</label>
                                     <select
                                         className="w-full bg-gray-950 border border-gray-700 rounded-xl px-6 py-4 text-white focus:border-purple-500 outline-none appearance-none"
-                                        value={layoutSettings.max_panels_per_page}
-                                        onChange={e => setLayoutSettings({ ...layoutSettings, max_panels_per_page: parseInt(e.target.value) })}
+                                        value={layoutSettings.panels_per_page || 'auto'}
+                                        onChange={e => setLayoutSettings({ ...layoutSettings, panels_per_page: e.target.value === 'auto' ? null : parseInt(e.target.value) })}
                                     >
+                                        <option value="auto">Auto (IA Decide)</option>
                                         {[1, 2, 3, 4, 5, 6].map(n => <option key={n} value={n}>{n} {n === 1 ? 'Panel' : 'Paneles'}</option>)}
                                     </select>
-                                </div>
-                                <div>
-                                    <label className="block text-[10px] font-bold text-gray-500 mb-3 uppercase tracking-widest">Total Paneles (Vacio = Auto)</label>
-                                    <input
-                                        type="number"
-                                        min="1"
-                                        className="w-full bg-gray-950 border border-gray-700 rounded-xl px-6 py-4 text-white focus:border-purple-500 outline-none transition-all"
-                                        value={layoutSettings.max_panels || ''}
-                                        placeholder="Auto"
-                                        onChange={e => setLayoutSettings({ ...layoutSettings, max_panels: e.target.value ? parseInt(e.target.value) : null })}
-                                    />
                                 </div>
                             </div>
 
@@ -413,7 +419,13 @@ const ProjectDashboard = ({ projectId, onStartGeneration }) => {
                                     <>
                                         <button
                                             onClick={() => {
-                                                onStartGeneration({ plan_only: true, skip_agent: true });
+                                                // Sync settings but skip agent to just open the editor
+                                                onStartGeneration({
+                                                    max_pages: project.max_pages,
+                                                    layout_style: project.layout_style,
+                                                    plan_only: true,
+                                                    skip_agent: true
+                                                });
                                                 setIsLayoutModalOpen(false);
                                             }}
                                             className="bg-gray-800 hover:bg-gray-700 text-gray-300 py-4 rounded-2xl font-bold transition-all flex flex-col items-center justify-center gap-1 border border-gray-700"

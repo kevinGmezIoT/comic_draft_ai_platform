@@ -34,6 +34,11 @@ class Project(models.Model):
     last_error = models.TextField(blank=True, null=True)
     world_bible = models.TextField(blank=True, help_text="Información global (nombres, estilos, localización, etc.)")
     style_guide = models.TextField(blank=True, help_text="Instrucciones de estilo visual constantes")
+    
+    # Campos de maquetación (Sincronizado con migración 0010)
+    layout_style = models.CharField(max_length=50, default="dynamic")
+    max_pages = models.IntegerField(default=3)
+    max_panels = models.IntegerField(blank=True, null=True)
 
     def __str__(self):
         return self.name

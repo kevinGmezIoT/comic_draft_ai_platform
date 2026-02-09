@@ -24,7 +24,6 @@ def generate_comic_async(project_id, sources, max_pages=3, max_panels=None, layo
         "sources": sources,
         "max_pages": max_pages,
         "max_panels": max_panels,
-        "max_panels_per_page": kwargs.get("max_panels_per_page", 4),
         "layout_style": layout_style,
         "plan_only": kwargs.get("plan_only", False),
         "panels": kwargs.get("panels", []),

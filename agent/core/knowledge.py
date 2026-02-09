@@ -57,15 +57,11 @@ class KnowledgeManager:
                     with open(local_url, 'wb') as f:
                         for chunk in r.iter_content(chunk_size=8192):
                             f.write(chunk)
-                elif not os.path.exists(url):
-                    # Si no es URL ni existe localmente, posiblemente es un path relativo que debió ser de S3
-                    if url.startswith('/'):
-                        print(f"ALERTA: Recibido path relativo '{url}'. Verifique la configuración de S3 en el Backend.")
-                    else:
-                        print(f"Archivo local no encontrado: {url}")
-                    continue
                 else:
-                    local_url = url
+                    print(f"ERROR: Archivo local no encontrado en la ruta: {url}")
+                    raise FileNotFoundError(f"No se pudo encontrar el archivo local: {url}")
+                
+                print(f"DEBUG: Cargando documento con extensión {url.split('.')[-1].lower()} desde {local_url}")
 
                 ext = local_url.split('.')[-1].lower()
                 if ext == 'pdf':
@@ -82,24 +78,17 @@ class KnowledgeManager:
                 #    os.remove(local_url)
 
             except Exception as e:
-                print(f"Error cargando {url}: {e}. Se ignorará este archivo.")
+                print(f"CRITICAL ERROR cargando {url}: {e}")
+                import traceback
+                traceback.print_exc()
+                raise e
 
-        # Si no hay documentos (caso prototipo/S3 simulado), inyectamos datos por defecto para el RAG
+        # Ya no hay inyección de datos por defecto. 
+        # Si no hay documentos, el sistema debe fallar para que el usuario sepa que su guion no se leyó.
         if not documents:
-            from langchain_core.documents import Document
-            print("Inyectando datos de mundo por defecto para el prototipo.")
-            documents = [
-                Document(
-                    page_content="""
-                    Mundo: Ciudad futurista con estética Noir y luces de neón.
-                    Estilo: Dibujo a mano, sombras profundas, alto contraste.
-                    Personajes: 
-                    - Héroe: Detective con gabardina larga y brazo robótico.
-                    - Villano: Inteligencia artificial con avatar holográfico púrpura.
-                    """,
-                    metadata={"source": "default_mock"}
-                )
-            ]
+            raise ValueError("No se pudo extraer ningún texto de los archivos proporcionados (S3/Local).")
+
+        print(f"Ingestados {len(documents)} documentos. Pasando a vectorización.")
 
         splits = self.text_splitter.split_documents(documents)
         vectorstore = Chroma.from_documents(

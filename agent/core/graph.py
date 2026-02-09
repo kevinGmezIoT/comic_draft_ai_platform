@@ -3,6 +3,7 @@ from langgraph.graph import StateGraph, END
 from .adapters import get_image_adapter
 from .knowledge import KnowledgeManager, CharacterManager
 from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, SystemMessage
 import json
 import os
@@ -16,6 +17,7 @@ class Panel(TypedDict):
     characters: List[str]
     image_url: str
     status: str
+    layout: dict
     balloons: List[dict] = []
 
 class AgentState(TypedDict):
@@ -23,7 +25,6 @@ class AgentState(TypedDict):
     sources: List[str]
     max_pages: int
     max_panels: int
-    max_panels_per_page: int
     layout_style: str # "dynamic" | "vertical" | "grid"
     world_model_summary: str
     full_script: str
@@ -55,7 +56,7 @@ def ingest_and_rag(state: AgentState):
 def world_model_builder(state: AgentState):
     print("--- WORLD MODEL BUILDING (Characters & Scenarios) ---")
     cm = CharacterManager(state["project_id"])
-    llm = ChatOpenAI(model="gpt-4o", temperature=0)
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
     
     prompt = f"""
     Basándote en este resumen del mundo, identifica a los personajes principales.
@@ -82,23 +83,60 @@ def world_model_builder(state: AgentState):
         print(f"Error extracting characters: {e}")
         
     return {"current_step": "planner"}
+
 def planner(state: AgentState):
     existing_panels = state.get("panels", [])
     max_panels = state.get("max_panels")
     
+    # Identificar si estamos regenerando una página específica
+    target_page = state.get("page_number")
+    preserved_panels = []
+    
+    if target_page:
+        # Preservar todos los paneles que NO son de la página objetivo
+        preserved_panels = [p for p in existing_panels if p.get("page_number") != target_page]
+        print(f"DEBUG: [SCOPED PLANNING] Preserving {len(preserved_panels)} panels from other pages. Target Page: {target_page}")
+
     # Si ya tenemos paneles con IDs reales (UUIDs) y descripción, probablemente 
     # venimos de una edición manual o regeneración de arte selectiva.
     # En ese caso, SOLO planificamos si nos falta algún panel o si nos piden explícitamente re-planear (cambiando max_panels).
-    if existing_panels and len(existing_panels) > 0:
-        if not max_panels or len(existing_panels) == max_panels:
-            # Verificar si tienen contenido real
-            if any(p.get('scene_description') for p in existing_panels):
-                print("--- SKIPPING STRATEGIC PLANNING (Using existing panels) ---")
-                return {"panels": existing_panels, "current_step": "layout_designer"}
+    # Solo saltamos planificación estratégica si NO estamos pidiendo un plan explícitamente (plan_only=True)
+    # y si tenemos paneles existentes que coinciden con el conteo deseado (o no hay conteo rígido).
+    # REGLA DE SALTO: 
+    # Solo saltamos la planificación estratégica si YA tenemos paneles Y NO estamos en un modo de planificación (plan_only).
+    if len(existing_panels) > 0 and not target_page and not state.get("plan_only"):
+        # Verificación profunda: ¿Son estos paneles reales del guion o son basura/fallbacks?
+        is_placeholder = any("placeholder" in str(p.get("scene_description", "") + p.get("prompt", "")).lower() for p in existing_panels)
+        
+        # Detectar si los paneles actuales vienen del fallback hardcoded del Detective (usado en versiones previas de knowledge.py)
+        is_fallback_content = any(kw in str(p.get("scene_description", "")).lower() for p in existing_panels for kw in ["detective", "avatar holográfico", "brazo robótico", "esquinas filosas"])
+        
+        if not is_placeholder and not is_fallback_content:
+            print(f"--- SKIPPING STRATEGIC PLANNING (Already have {len(existing_panels)} real panels) ---")
+            return {"panels": existing_panels, "current_step": "layout_designer"}
+        else:
+            reason = "placeholders" if is_placeholder else "fallback content (Detective/IA)"
+            print(f"--- CONTINUING TO PLANNING (Found {reason}) ---")
 
+    if target_page:
+        preserved_panels = [p for p in existing_panels if p.get("page_number") != target_page]
+        print(f"DEBUG: [SCOPED PLANNING] Preserving {len(preserved_panels)} panels. Target Page: {target_page}")
+
+    # Calcular estructura de páginas basada en los paneles existentes (si los hay)
+    page_structure = {}
+    if existing_panels:
+        for p in existing_panels:
+            p_num = p.get("page_number", 1)
+            page_structure[p_num] = page_structure.get(p_num, 0) + 1
+    
+    # Formatear la sugerencia de estructura para el prompt
+    structure_str = ""
+    if page_structure:
+        parts = [f"Página {k}: {v} paneles" for k, v in sorted(page_structure.items())]
+        structure_str = f"ESTRUCTURA DE LIENZO ACTUAL (REQUERIDA): {', '.join(parts)}."
+    
     print("--- STRATEGIC PLANNING ---")
-    # Usar un modelo capaz de razonar el layout
-    llm = ChatOpenAI(model="gpt-4o", temperature=0.2)
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
     
     prompt = f"""
     Basándote en el siguiente SUMMARY del mundo y SCRIPT:
@@ -111,64 +149,81 @@ def planner(state: AgentState):
     
     TAMAÑO DE PÁGINA RECOMENDADO: {state.get('canvas_dimensions', '800x1100 (A4)')}
     ESTILO DE LAYOUT: {state.get('layout_style', 'dynamic')}
+    {structure_str}
 
-    Divide la historia en una lista de paneles para un cómic. 
-    REGLAS ESTRICTAS DE LAYOUT:
-    - MÁXIMO ABSOLUTO DE {state.get('max_pages', 3)} PÁGINAS.
-    - MÁXIMO DE {state.get('max_panels_per_page', 4)} PANELES POR PÁGINA.
-    - CANTIDAD TOTAL DE PANELES REQUERIDA: {state.get('max_panels') if state.get('max_panels') else 'Tu decisión experta'}.
+    {'ESTÁS REGENERANDO ÚNICAMENTE LA PÁGINA ' + str(target_page) if target_page else 'ESTÁS GENERANDO EL CÓMIC COMPLETO'}
     
-    ESTILO NARRATIVO:
-    - EVITA EL GRID RÍGIDO: Sugiere composiciones dinámicas (paneles que se solapan, ángulos cinematográficos).
-    - Ten en cuenta el espacio para los globos de texto que se generarán después.
+    ORDEN DE PRIORIDAD:
+    - **DISTRIBUCIÓN ESTRICTA**: { 'Sigue exactamente la ESTRUCTURA DE LIENZO ACTUAL indicada arriba.' if structure_str else 'Reparte los ' + str(state.get('max_panels', 'paneles')) + ' entre las ' + str(state.get('max_pages', 3)) + ' páginas.' }
+    - **ÍNDICE DE ORDEN (CRÍTICO)**: El campo `order_in_page` DEBE EMPEZAR EN 0 para el primer panel de cada página. (Ej: 0, 1, 2...). No empieces en 1.
+    - Si el número total de paneles es {state.get('max_panels', 0)} y tienes {state.get('max_pages', 3)} páginas, asegúrate de que el campo `page_number` avance lógicamente.
+    - **CONTINUIDAD**: Si estás generando el cómic completo, el primer panel de la Página 2 debe ser la continuación inmediata del último panel de la Página 1.
+    - **LIMITACIÓN**: Si el guion es muy largo y el espacio es pequeño, enfócate en cubrir el INICIO de la historia. No resumas todo el guion si eso implica perder el detalle visual de las escenas iniciales.
     
-    Para cada panel, proporciona:
-    - id: un identificador único (ej: p1_1)
-    - page_number: número de página (máximo {state.get('max_pages', 3)})
-    - order_in_page: orden del panel en la página
-    - scene_description: descripción detallada de la acción (pensada para un modelo multimodal)
-    - characters: lista de nombres de personajes presentes.
-    - prompt: un prompt visual rico para generación de imagen.
+    FORMATO JSON OBLIGATORIO:
+    {{
+        "panels": [
+            {{
+                "page_number": 1,
+                "order_in_page": 0,
+                "scene_description": "Descripción detallada de la escena...",
+                "characters": ["Nombre del Personaje"]
+            }}
+        ]
+    }}
     
-    Responde ÚNICAMENTE con un JSON válido.
+    Responde ÚNICAMENTE con un JSON válido. No incluyas texto fuera del bloque de código JSON.
     """
     
     try:
-        # Fallback si no hay script ni guión (Prototipo/S3 simulado)
-        if not state.get('full_script') or len(state['full_script'].strip()) < 10:
-            print("--- WARNING: Script empty or too short. Using Template Fallback. ---")
-            target_count = state.get('max_panels', 4) or 4
-            panels = []
-            for i in range(target_count):
-                panels.append({
-                    "id": f"p_temp_{i+1}",
-                    "page_number": 1,
-                    "order_in_page": i + 1,
-                    "scene_description": f"Escena {i+1} (Plantilla)",
-                    "characters": [],
-                    "prompt": "Cinematic comic panel placeholder"
-                })
-        else:
-            response = llm.invoke([
-                SystemMessage(content="Eres un director de arte de cómics experto en descomposición de guiones. Responde SIEMPRE con un JSON válido."),
-                HumanMessage(content=prompt)
-            ])
-            
-            content = response.content.strip()
-            print(f"DEBUG: LLM Planner Output: {content[:200]}...")
+        if not state.get('full_script') or len(state['full_script'].strip()) < 5:
+            raise ValueError("DEBUG ERROR: El script está vacío o es demasiado corto para planificar.")
 
-            if content.startswith("```json"):
-                content = content[7:-3].strip()
-            
-            data = json.loads(content)
-            # Manejar tanto lista [...] como objeto {"panels": [...]}
-            if isinstance(data, dict):
-                panels = data.get("panels", [])
-            else:
+        response = llm.invoke([
+            SystemMessage(content="Eres un director de arte de cómics experto en descomposición de guiones. Responde SIEMPRE con un JSON válido."),
+            HumanMessage(content=prompt)
+        ])
+        
+        content = response.content.strip()
+        print(f"DEBUG: LLM Planner Output: {content[:200]}...")
+
+        if content.startswith("```json"):
+            content = content[7:-3].strip()
+        
+        data = json.loads(content)
+        
+        def find_all_panels(obj):
+            found = []
+            keys_to_match = ["scene_description", "prompt", "descripcion", "guion", "escena", "accion", "texto", "description", "panel_description"]
+            if isinstance(obj, list):
+                for item in obj:
+                    if isinstance(item, dict) and any(k in item for k in keys_to_match):
+                        found.append(item)
+                    else:
+                        found.extend(find_all_panels(item))
+            elif isinstance(obj, dict):
+                if any(k in obj for k in keys_to_match):
+                    found.append(obj)
+                else:
+                    for value in obj.values():
+                        found.extend(find_all_panels(value))
+            return found
+
+        panels = find_all_panels(data)
+        if not panels:
+            if isinstance(data, list):
                 panels = data
         
         if not panels:
-             raise ValueError("No panels were generated by the LLM or Fallback")
+             raise ValueError("No panels were generated by the LLM from the script.")
+
+        page_counts = {}
+        # Crear un mapa de layouts existentes para preservación (heurística de posición)
+        existing_layout_map = {
+            (p.get("page_number"), p.get("order_in_page")): p.get("layout") 
+            for p in existing_panels 
+            if p.get("layout") and p.get("layout").get("w", 0) > 0
+        }
 
         for i, p in enumerate(panels):
             p.setdefault("id", f"p_{i}")
@@ -176,40 +231,49 @@ def planner(state: AgentState):
             p.setdefault("status", "pending")
             p.setdefault("characters", [])
             
-        return {"panels": panels, "current_step": "layout_designer"}
+            p_num = target_page if target_page else p.get("page_number", 1)
+            p["page_number"] = p_num
+            p_order = page_counts.get(p_num, 0)
+            p["order_in_page"] = p_order
+            page_counts[p_num] = p_order + 1
+
+            # Intentar recuperar layout previo si coincide la posición
+            prev_layout = existing_layout_map.get((p_num, p_order))
+            if prev_layout:
+                print(f"DEBUG: [PLANNER] Inheriting Layout for Pág {p_num}, Orden {p_order} -> {prev_layout}")
+                p["layout"] = prev_layout
+            else:
+                p.setdefault("layout", {})
+            
+            if not p.get("prompt"):
+                p["prompt"] = "Cinematic comic panel"
+
+        final_panels = preserved_panels + panels
+        return {"panels": final_panels, "current_step": "layout_designer"}
     except Exception as e:
-        print(f"Error en planner: {e}")
-        # Segundo nivel de fallback: Generar paneles mínimos forzados
-        target_count = state.get('max_panels') or state.get('max_pages', 1) * 2
-        fallback_panels = [{
-            "id": f"f_{i}",
-            "page_number": (i // state.get('max_panels_per_page', 4)) + 1,
-            "order_in_page": i + 1,
-            "scene_description": "Escena generada por recuperación de error.",
-            "characters": [],
-            "prompt": "Comic panel placeholder",
-            "image_url": "",
-            "status": "pending"
-        } for i in range(target_count)]
-        return {"panels": fallback_panels, "current_step": "layout_designer"}
+        print(f"CRITICAL ERROR en planner: {e}")
+        import traceback
+        traceback.print_exc()
+        raise e
 
 def image_generator(state: AgentState):
     print("--- MULTIMODAL IMAGE GENERATION ---")
     adapter = get_image_adapter()
     cm = CharacterManager(state["project_id"])
-    llm = ChatOpenAI(model="gpt-4o", temperature=0.3)
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.3)
     
     updated_panels = []
     # Ordenar por página y orden de forma defensiva
     sorted_panels = sorted(state["panels"], key=lambda x: (x.get('page_number', 1), x.get('order_in_page', 0)))
     
     for panel in sorted_panels:
+        print(f"DEBUG: Image Generator Input -> Panel: {panel.get('id')}, Layout: {panel.get('layout')}")
         # Lógica de salto: Si tiene imagen y NO está pendiente de regenerar, saltar.
         if panel.get("image_url") and panel.get("status") not in ["pending", "editing"]:
             updated_panels.append(panel)
             continue
 
-        # 1. Razonamiento Multimodal: GPT-4o para potenciar el prompt visual según el layout
+        # 1. Razonamiento Multimodal: GPT-4o-mini para potenciar el prompt visual según el layout
         layout = panel.get("layout", {"w": 50, "h": 50})
         w, h = layout.get("w", 50), layout.get("h", 50)
         
@@ -238,8 +302,12 @@ def image_generator(state: AgentState):
         
         try:
             visual_reasoning = llm.invoke(reasoning_prompt).content.strip()
-            print(f"Multimodal Insight for Panel {panel['id']}: {visual_reasoning[:50]}...")
-        except:
+            print(f"DEBUG: Multimodal Insight for Panel {panel['id']}: {visual_reasoning[:50]}...")
+        except Exception as e:
+            print(f"ERROR: Multimodal reasoning failed for panel {panel['id']}: {e}")
+            # Si el prompt original es un placeholder, lanzamos error porque no queremos basura
+            if "placeholder" in panel.get('prompt', '').lower():
+                raise ValueError(f"No se pudo generar un prompt real para el panel {panel['id']} y el original era un placeholder.")
             visual_reasoning = panel['prompt']
 
         # 2. Generación de Imagen con Aspect Ratio
@@ -250,6 +318,8 @@ def image_generator(state: AgentState):
             
         panel["image_url"] = url
         panel["status"] = "generated"
+        # Actualizar el prompt con el razonamiento visual para persistencia
+        panel["prompt"] = visual_reasoning
         updated_panels.append(panel)
         
     return {"panels": updated_panels, "current_step": "balloons"}
@@ -261,9 +331,15 @@ def layout_designer(state: AgentState):
         print("--- WARNING: No panels to design layout for. ---")
         return {"current_step": "generator"}
     
-    # Si los paneles ya tienen un layout definido con dimensiones reales, respetarlo
     # Solo diseñamos layout para los que les falte
-    panels_needing_layout = [p for p in panels if not (p.get("layout") and p["layout"].get("w") and p["layout"].get("w") > 0)]
+    panels_needing_layout = []
+    for p in panels:
+        ly = p.get("layout", {})
+        px_w = ly.get("w", 0)
+        if not (ly and px_w and float(px_w) > 0):
+            panels_needing_layout.append(p)
+    
+    print(f"DEBUG: Total panels: {len(panels)}, Panels needing layout: {len(panels_needing_layout)}")
     
     if not panels_needing_layout:
         print("--- SKIPPING LAYOUT DESIGN (All panels have layout defined) ---")
@@ -289,9 +365,18 @@ def layout_designer(state: AgentState):
         
         for i, p in enumerate(p_list):
             # NO TOCAR si ya tiene layout (ej: editado manualmente en el frontend)
-            if p.get("layout") and p["layout"].get("w", 0) > 0:
-                updated_panels.append(p)
-                continue
+            ly = p.get("layout", {})
+            # Aceptamos tanto 'w' como 'width' por si acaso, y validamos que sea mayor a 0
+            w_val = ly.get("w") or ly.get("width")
+            try:
+                if w_val and float(w_val) > 0:
+                    print(f"DEBUG: [LAYOUT DESIGNER] Preservando Layout Panel {p.get('id')} -> x:{ly.get('x')}, y:{ly.get('y')}, w:{w_val}, h:{ly.get('h')}")
+                    updated_panels.append(p)
+                    continue
+            except (ValueError, TypeError):
+                pass
+
+            print(f"DEBUG: [LAYOUT DESIGNER] Diseñando Layout para Panel {p.get('id')} (Pág {page_num}, Index {i})")
 
             if layout_pref == "vertical":
                 # Fuerza stack vertical
@@ -333,6 +418,12 @@ def layout_designer(state: AgentState):
                     p["layout"] = {"x": col*50, "y": row*h, "w": 50, "h": h}
             
             updated_panels.append(p)
+    
+    # Salvaguarda: Asegurarse de no perder ningún panel del estado original
+    accounted_ids = set(str(p.get("id")) for p in updated_panels)
+    for p in panels:
+        if str(p.get("id")) not in accounted_ids:
+            updated_panels.append(p)
 
     return {"panels": updated_panels, "current_step": "generator"}
 
@@ -362,33 +453,51 @@ def page_merger(state: AgentState):
         # 1. Crear el collage base con globos (como guía para la IA)
         composite_path = renderer.create_composite_page(panel_list, include_balloons=True)
         
-        # 1.5. Análisis Multimodal para Blend (Opcional pero recomendado para alta calidad)
-        # Podríamos usar GPT-4o con la imagen 'composite_path' para generar una descripción de mezcla.
-        llm_vision = ChatOpenAI(model="gpt-4o", temperature=0.2)
-        
-        # Para enviar la imagen a GPT-4o, la codificamos en b64
+        # 1.5. Análisis Multimodal para Blend (Uso de Gemini con Fallback)
         import base64
         with open(composite_path, "rb") as f:
             composite_b64 = base64.b64encode(f.read()).decode("utf-8")
         
         vision_prompt = "Esta es una maqueta de una página de cómic con paneles y globos. Describe cómo deberían mezclarse los fondos de manera artística y orgánica para que parezca una sola ilustración fluida, manteniendo la posición de los personajes y globos."
-        
-        try:
-            message = HumanMessage(
-                content=[
-                    {"type": "text", "text": vision_prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{composite_b64}"},
-                    },
-                ]
-            )
-            vision_response = llm_vision.invoke([message])
-            visual_blend_description = vision_response.content
-            print(f"Visual Blend Insight: {visual_blend_description[:100]}...")
-        except Exception as e:
-            print(f"Vision analysis failed: {e}. Falling back to default prompt.")
-            visual_blend_description = "Blend the backgrounds smoothly."
+
+        def get_visual_blend_description(b64_image, prompt):
+            # Intentar primero con Gemini 2.0 Flash, luego 1.5 Flash, y finalmente GPT-4o-mini
+            models_to_try = [
+                ("google", "gemini-2.0-flash"),
+                ("google", "gemini-1.5-flash"),
+                ("openai", "gpt-4o-mini")
+            ]
+            
+            last_error = None
+            for provider, model_name in models_to_try:
+                try:
+                    print(f"DEBUG: Attempting visual analysis with {model_name}...")
+                    if provider == "google":
+                        llm = ChatGoogleGenerativeAI(model=model_name, temperature=0.2)
+                    else:
+                        llm = ChatOpenAI(model=model_name, temperature=0.2)
+                        
+                    message = HumanMessage(
+                        content=[
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/png;base64,{b64_image}"},
+                            },
+                        ]
+                    )
+                    response = llm.invoke([message])
+                    return response.content
+                except Exception as e:
+                    print(f"WARNING: Model {model_name} failed: {e}")
+                    last_error = e
+                    continue
+            
+            print(f"ERROR: All models failed for vision analysis. Fallback to default prompt. Last error: {last_error}")
+            return "Blend the backgrounds smoothly."
+
+        visual_blend_description = get_visual_blend_description(composite_b64, vision_prompt)
+        print(f"Visual Blend Insight: {visual_blend_description[:100]}...")
 
         merge_prompt = f"ORGANIC COMIC PAGE MERGE. Instrucciones visuales: {visual_blend_description}. Style: {state.get('world_model_summary', '')}. Professional comic art style."
         
@@ -434,7 +543,7 @@ def page_merger(state: AgentState):
 
 def balloon_generator(state: AgentState):
     print("--- GENERATING DIALOGUE BALLOONS ---")
-    llm = ChatOpenAI(model="gpt-4o", temperature=0)
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
     
     # Preparamos los paneles para que el LLM les asigne texto
     panels_context = []

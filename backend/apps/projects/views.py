@@ -14,68 +14,115 @@ class GenerateComicView(APIView):
 
         if request.data.get("plan_only", False):
             # FAST PATH: Generación síncrona de maquetación (cuadros en blanco)
-            max_pages = int(request.data.get("max_pages", 1))
-            panels_per_page = int(request.data.get("max_panels_per_page", 4))
-            target_page_num = request.data.get("page_number") # Opcional: solo regenerar una página
-
-            if target_page_num is not None:
-                target_page_num = int(target_page_num)
-                # Asegurar que todas las páginas hasta max_pages existan
-                for p_num in range(1, max_pages + 1):
-                    Page.objects.get_or_create(project=project, page_number=p_num)
-
-                # Regenerar SOLO una página específica
-                page = Page.objects.get(project=project, page_number=target_page_num)
-                page.panels.all().delete()
+            try:
+                # Usar variables locales en lugar de atributos del modelo inexistentes
+                req_max_pages = request.data.get("max_pages")
+                max_pages = int(req_max_pages) if req_max_pages is not None else project.pages.count() or 1
                 
-                for i in range(panels_per_page):
-                    # Layout grid base
-                    row = i // 2
-                    col = i % 2
-                    rows_count = (panels_per_page + 1) // 2
-                    cols_count = 2 if panels_per_page > 1 else 1
-                    w = 100 / cols_count
-                    h = 100 / rows_count
-                    
-                    Panel.objects.create(
-                        page=page,
-                        order=i,
-                        prompt="Cinematic comic panel placeholder",
-                        scene_description=f"Escena {((target_page_num-1)*panels_per_page) + i + 1}",
-                        layout={"x": col*w, "y": row*h, "w": w, "h": h},
-                        status="pending"
-                    )
-                project.status = "completed"
-                project.save()
-                return Response({"status": "completed", "message": f"Page {target_page_num} redesigned."}, status=status.HTTP_200_OK)
+                raw_mppp = request.data.get("panels_per_page")
+                print(f"DEBUG: [PLAN ONLY] panels_per_page raw: {raw_mppp}")
 
-            # RESET GLOBAL: El usuario pide regenerar TODO
-            if not request.data.get("skip_cleaning", False):
-                project.pages.all().delete()
-            
-            for p_num in range(1, max_pages + 1):
-                page, _ = Page.objects.get_or_create(project=project, page_number=p_num)
-                
-                for i in range(panels_per_page):
-                    row = i // 2
-                    col = i % 2
-                    rows_count = (panels_per_page + 1) // 2
-                    cols_count = 2 if panels_per_page > 1 else 1
-                    w = 100 / cols_count
-                    h = 100 / rows_count
-                    
-                    Panel.objects.create(
-                        page=page,
-                        order=i,
-                        prompt="Cinematic comic panel placeholder",
-                        scene_description=f"Escena {((p_num-1)*panels_per_page) + i + 1}",
-                        layout={"x": col*w, "y": row*h, "w": w, "h": h},
-                        status="pending"
-                    )
+                if raw_mppp == 'auto' or raw_mppp is None:
+                    panels_per_page = None
+                else:
+                    panels_per_page = int(raw_mppp)
 
-            project.status = "completed"
-            project.save()
-            return Response({"status": "completed", "message": f"Layout designed for {max_pages} pages."}, status=status.HTTP_200_OK)
+                # Si es AUTO (None), no podemos usar el FAST PATH síncrono porque requiere IA. 
+                # Delegamos al Agente (Slow Path) para que haga el trabajo inteligente.
+                if panels_per_page is None:
+                    print("DEBUG: [PLAN ONLY] IA Decide detected. Routing to Agent Slow Path.")
+                    pass # Continuar hacia la lógica del agente abajo
+                else:
+                    target_page_num = request.data.get("page_number") # Opcional: solo regenerar una página
+
+                    if target_page_num is not None:
+                        target_page_num = int(target_page_num)
+                        # Asegurar que todas las páginas hasta max_pages existan
+                        for p_num in range(1, max_pages + 1):
+                            Page.objects.get_or_create(project=project, page_number=p_num)
+
+                        # Regenerar SOLO una página específica
+                        page = Page.objects.get(project=project, page_number=target_page_num)
+                        page.panels.all().delete()
+                        
+                        for i in range(panels_per_page):
+                            # Layout grid base
+                            row = i // 2
+                            col = i % 2
+                            rows_count = (panels_per_page + 1) // 2
+                            cols_count = 2 if panels_per_page > 1 else 1
+                            w = 100 / cols_count
+                            h = 100 / rows_count
+                            
+                            Panel.objects.create(
+                                page=page,
+                                order=i,
+                                prompt="Cinematic comic panel placeholder",
+                                scene_description=f"Escena {((target_page_num-1)*panels_per_page) + i + 1}",
+                                layout={"x": col*w, "y": row*h, "w": w, "h": h},
+                                status="pending"
+                            )
+                        project.status = "completed"
+                        project.save()
+                        return Response({"status": "completed", "message": f"Page {target_page_num} redesigned."}, status=status.HTTP_200_OK)
+
+                    # RESET GLOBAL: El usuario pide regenerar TODO (Sync Path)
+                    if not request.data.get("skip_cleaning", False):
+                        project.pages.all().delete()
+                    
+                    for p_num in range(1, max_pages + 1):
+                        page, _ = Page.objects.get_or_create(project=project, page_number=p_num)
+                        
+                        for i in range(panels_per_page):
+                            row = i // 2
+                            col = i % 2
+                            rows_count = (panels_per_page + 1) // 2
+                            cols_count = 2 if panels_per_page > 1 else 1
+                            w = 100 / cols_count
+                            h = 100 / rows_count
+                            
+                            Panel.objects.create(
+                                page=page,
+                                order=i,
+                                prompt="Cinematic comic panel placeholder",
+                                scene_description=f"Escena {((p_num-1)*panels_per_page) + i + 1}",
+                                layout={"x": col*w, "y": row*h, "w": w, "h": h},
+                                status="pending"
+                            )
+
+                    project.status = "completed"
+                    project.save()
+                    return Response({"status": "completed", "message": f"Layout designed for {max_pages} pages."}, status=status.HTTP_200_OK)
+            except (ValueError, TypeError) as e:
+                print(f"DEBUG: Fast path error or IA Decide requirement: {e}")
+                # Si falla o es IA decide, caemos al slow path del agente
+                pass
+
+        # Sincronizar preferencias del usuario con el modelo persistente
+        req_max_pages = request.data.get("max_pages")
+        if req_max_pages is not None:
+            project.max_pages = int(req_max_pages)
+        
+
+        req_max_panels = request.data.get("max_panels")
+        if req_max_panels is not None and str(req_max_panels).isdigit():
+            project.max_panels = int(req_max_panels)
+
+        project.layout_style = request.data.get("layout_style", project.layout_style)
+        project.save()
+
+        plan_only = request.data.get("plan_only", False)
+        skip_agent = request.data.get("skip_agent", False)
+
+        if plan_only and skip_agent:
+            return Response({
+                "status": "skipped",
+                "project_id": project.id,
+                "layout_settings": {
+                    "max_pages": project.max_pages,
+                    "layout_style": project.layout_style
+                }
+            })
 
         # Enviar a cola del Agente (Solo para generación de arte real)
         agent_url = f"{settings.AGENT_SERVICE_URL}/generate"
@@ -90,15 +137,14 @@ class GenerateComicView(APIView):
         else:
             # Fallback por si no hay archivo, pero ya no es hardcoded a un bucket fijo ajeno
             sources = state_sources if (state_sources := request.data.get("sources")) else []
-
+        
         payload = {
             "project_id": str(project.id),
             "sources": sources,
-            "max_pages": request.data.get("max_pages", 3),
-            "max_panels": request.data.get("max_panels"),
-            "max_panels_per_page": request.data.get("max_panels_per_page", 4),
-            "layout_style": request.data.get("layout_style", "dynamic"),
-            "plan_only": False,
+            "max_pages": project.max_pages,
+            "max_panels": len(request.data.get("panels", [])),
+            "layout_style": project.layout_style,
+            "plan_only": request.data.get("plan_only", False),
             "panels": request.data.get("panels", []),
             "global_context": {
                 "world_bible": project.world_bible,
@@ -167,6 +213,9 @@ class ProjectDetailView(APIView):
                 "style_guide": project.style_guide,
                 "status": project.status,
                 "last_error": project.last_error,
+                "layout_style": project.layout_style,
+                "max_pages": project.max_pages,
+                "max_panels": project.max_panels,
                 "pages": pages_data,
                 "notes": [{
                     "id": n.id,
@@ -239,7 +288,7 @@ class AgentCallbackView(APIView):
                         page=pages_map[p_num],
                         order=p_data.get('order_in_page', 0),
                         defaults={
-                            "prompt": p_data['prompt'],
+                            "prompt": p_data.get('prompt', 'Cinematic comic panel'),
                             "scene_description": p_data.get('scene_description', ''),
                             "balloons": p_data.get('balloons', []),
                             "layout": p_data.get('layout', {}),
@@ -248,7 +297,7 @@ class AgentCallbackView(APIView):
                     )
                 else:
                     # Actualizar existente
-                    panel.prompt = p_data['prompt']
+                    panel.prompt = p_data.get('prompt', panel.prompt)
                     panel.scene_description = p_data.get('scene_description', '')
                     panel.balloons = p_data.get('balloons', [])
                     panel.layout = p_data.get('layout', {})
@@ -262,10 +311,14 @@ class AgentCallbackView(APIView):
                     panel.image.name = p_data['image_url']
                     panel.save()
 
-            # RECONCILIACIÓN: Eliminar paneles que el agente ya no reporta (si estamos en modo regeneración total o parcial)
-            # Solo eliminamos de las páginas que el agente tocó
+            # RECONCILIACIÓN: 
+            # 1. Eliminar paneles que el agente ya no reporta en las páginas que se han tocado
             for p_num, page in pages_map.items():
                 page.panels.exclude(id__in=processed_panel_ids).delete()
+            
+            # 2. Eliminar páginas excedentes (Si el agente reportó menos páginas o si estamos reorganizando)
+            # Esto soluciona que si pasas de 3 a 2 páginas, la 3ra página vacía desaparezca.
+            project.pages.exclude(page_number__in=pages_map.keys()).delete()
             
             # Guardar URLs de páginas fusionadas (Organic Merge)
             merged_pages_data = result.get('merged_pages', [])

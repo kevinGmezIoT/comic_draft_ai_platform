@@ -23,6 +23,8 @@ dependencies = [
     "docx2txt",
     "tiktoken",
     "pillow>=12.1.0",
+    "langchain-google-genai>=4.2.0",
+    "google-generativeai>=0.8.6",
 ]
 
 [tool.uv]
