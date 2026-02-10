@@ -24,7 +24,7 @@ dependencies = [
     "tiktoken",
     "pillow>=12.1.0",
     "langchain-google-genai>=4.2.0",
-    "google-generativeai>=0.8.6",
+    "google-genai>=1.62.0",
 ]
 
 [tool.uv]

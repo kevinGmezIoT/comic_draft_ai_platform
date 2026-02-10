@@ -146,10 +146,80 @@ class BedrockTitanAdapter(ImageModelAdapter):
     def edit_image(self, original_image_url: str, prompt: str, mask_url: str = None) -> str:
         return super().edit_image(original_image_url, prompt, mask_url)
 
+class GoogleGeminiAdapter(ImageModelAdapter):
+    def __init__(self):
+        from google import genai
+        self.api_key = os.getenv("GOOGLE_API_KEY")
+        if not self.api_key:
+            raise ValueError("GOOGLE_API_KEY not found in environment.")
+        self.client = genai.Client(api_key=self.api_key)
+        # Modelo verificado por el usuario
+        self.model_id = "gemini-2.5-flash-image"
+
+    def generate_image(self, prompt: str, aspect_ratio: str = "1:1", init_image_path: str = None, **kwargs) -> str:
+        from google.genai import types
+        import PIL.Image
+        
+        # Mapear aspect ratio según soporte de Imagen 3 / Gemini Image
+        ar_map = {
+            "1:1": "1:1",
+            "16:9": "16:9",
+            "9:16": "9:16",
+            "3:4": "3:4",
+            "4:3": "4:3"
+        }
+        target_ar = ar_map.get(aspect_ratio, "1:1")
+
+        try:
+            contents = [prompt]
+            if init_image_path:
+                print(f"DEBUG: Multi-modal Image Variation (i2i) with {self.model_id}...")
+                img = PIL.Image.open(init_image_path)
+                contents.append(img)
+            else:
+                print(f"DEBUG: Multi-modal Text-to-Image with {self.model_id}...")
+
+            # Para Gemini multimodal con salida de imagen:
+            response = self.client.models.generate_content(
+                model=self.model_id,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    response_modalities=["IMAGE"],
+                    image_config=types.ImageConfig(
+                        aspect_ratio=target_ar
+                    )
+                )
+            )
+
+            image_bytes = None
+            for part in response.parts:
+                if part.inline_data:
+                    image_bytes = part.inline_data.data
+                    break
+            
+            if not image_bytes:
+                # Algunos SDKs pueden devolver la imagen de forma distinta en response.candidates
+                if hasattr(response, 'candidates') and response.candidates:
+                    for part in response.candidates[0].content.parts:
+                        if part.inline_data:
+                            image_bytes = part.inline_data.data
+                            break
+
+            if not image_bytes:
+                raise ValueError(f"No image data found in Gemini response. Response: {response}")
+
+            return self._upload_to_s3(image_bytes)
+
+        except Exception as e:
+            print(f"ERROR in GoogleGeminiAdapter: {e}")
+            raise e
+
 def get_image_adapter() -> ImageModelAdapter:
     provider = os.getenv("IMAGE_GEN_PROVIDER", "openai").lower()
     if provider == "openai":
         return OpenAIAdapter()
     elif provider == "bedrock":
         return BedrockTitanAdapter()
+    elif provider == "gemini":
+        return GoogleGeminiAdapter()
     raise ValueError(f"Provider {provider} not supported.")
