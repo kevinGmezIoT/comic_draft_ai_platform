@@ -1,5 +1,4 @@
-flask
-flask-cors
+aws-opentelemetry-distro>=0.15.0
 python-dotenv
 langchain
 langchain-openai
@@ -9,9 +8,12 @@ langgraph
 pydantic
 requests
 boto3
-celery[redis]
-redis
 chromadb
 pypdf
 docx2txt
 tiktoken
+langchain-google-genai>=4.2.0
+google-genai>=1.62.0
+bedrock-agentcore>=1.2.1
+bedrock-agentcore-starter-toolkit>=0.2.10
+pillow>=12.1.0

@@ -377,8 +377,17 @@ const ProjectDashboard = ({ projectId, onStartGeneration }) => {
                                     type="number"
                                     min="1" max="10"
                                     className="w-full bg-gray-950 border border-gray-700 rounded-xl px-6 py-4 text-white focus:border-purple-500 outline-none transition-all"
-                                    value={layoutSettings.max_pages}
-                                    onChange={e => setLayoutSettings({ ...layoutSettings, max_pages: parseInt(e.target.value) })}
+                                    value={isNaN(layoutSettings.max_pages) ? "" : layoutSettings.max_pages}
+                                    onChange={e => {
+                                        const val = e.target.value;
+                                        if (val === "") {
+                                            setLayoutSettings({ ...layoutSettings, max_pages: NaN });
+                                        } else {
+                                            const n = parseInt(val);
+                                            if (!isNaN(n)) setLayoutSettings({ ...layoutSettings, max_pages: n });
+                                        }
+                                    }}
+
                                 />
                             </div>
 

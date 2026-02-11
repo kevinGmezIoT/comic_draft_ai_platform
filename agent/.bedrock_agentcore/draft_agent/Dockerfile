@@ -1,4 +1,4 @@
-FROM public.ecr.aws/docker/library/python:3.10-slim
+FROM python:3.10-slim
 
 WORKDIR /app
 
@@ -14,4 +14,4 @@ COPY . .
 
 EXPOSE 8001
 
-CMD ["python", "worker.py"]
+CMD ["python", "app.py"]

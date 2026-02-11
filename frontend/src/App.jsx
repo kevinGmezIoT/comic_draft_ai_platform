@@ -15,10 +15,16 @@ function App() {
     const [panels, setPanels] = useState([]);
     const [pages, setPages] = useState([]);
     const [selectedPanel, setSelectedPanel] = useState(null);
+
+    // Configuración Propuesta (la que se edita en la barra lateral)
     const [maxPages, setMaxPages] = useState(3);
     const [maxPanels, setMaxPanels] = useState(6);
     const [maxPanelsPerPage, setMaxPanelsPerPage] = useState(4);
     const [layoutStyle, setLayoutStyle] = useState('dynamic');
+
+    // Configuración Activa (la que el backend dice que tiene el proyecto actualmente)
+    const [activeMaxPages, setActiveMaxPages] = useState(3);
+
     const [pageFormat, setPageFormat] = useState('A4'); // A4, Square, Widescreen
     const [currentPage, setCurrentPage] = useState(1);
 
@@ -40,6 +46,7 @@ function App() {
     const [saving, setSaving] = useState(false);
     const [regenerating, setRegenerating] = useState(false);
     const isUpdatingLayout = React.useRef(false);
+    const isGeneratingRef = React.useRef(false);
     const pollingInterval = React.useRef(null);
     const [pollingRetryCount, setPollingRetryCount] = useState(0);
 
@@ -64,14 +71,23 @@ function App() {
                 const allPanels = response.data.pages.flatMap(p => p.panels);
                 setPanels(allPanels);
 
-                // Priorizar estados oficiales del backend
+                // Priorizar estados oficiales del backend para la visualización activa
                 const backendMaxPages = response.data.max_pages || response.data.pages.length || 3;
                 const backendMaxPanels = response.data.max_panels || allPanels.length || 6;
-                const actualMaxPanelsPerPage = response.data.pages.reduce((max, p) => Math.max(max, p.panels.length), 0) || maxPanelsPerPage;
-                setMaxPages(backendMaxPages);
-                setMaxPanels(backendMaxPanels);
-                setMaxPanelsPerPage(actualMaxPanelsPerPage);
-                setLayoutStyle(response.data.layout_style || 'dynamic');
+                const actualMaxPanelsPerPage = response.data.pages.reduce((max, p) => Math.max(max, p.panels.length), 0) || 4;
+
+                const isBackendBusy = response.data.status === 'processing' || response.data.status === 'queued';
+
+                // Solo actualizamos la estructura del proyecto si:
+                // 1. No estamos en medio de una generación local (según el Ref)
+                // 2. El backend NO está ocupado, O si está 'completed'
+                if (!isGeneratingRef.current && !isBackendBusy) {
+                    setActiveMaxPages(backendMaxPages);
+                    setMaxPages(backendMaxPages);
+                    setMaxPanels(backendMaxPanels);
+                    setMaxPanelsPerPage(actualMaxPanelsPerPage);
+                    setLayoutStyle(response.data.layout_style || 'dynamic');
+                }
             }
         } catch (error) {
             console.error("Error fetching project:", error);
@@ -98,6 +114,7 @@ function App() {
 
     const handleGenerate = async (settings = {}) => {
         setLoading(true);
+        isGeneratingRef.current = true;
         setError(null);
 
         // Map existing panels for the agent payload
@@ -115,12 +132,26 @@ function App() {
         // para que el agente reconozca IDs de paneles ya creados y mantenga sus layouts.
         const panelsToSync = (panels.length > 0) ? existingPanels : [];
 
-        console.log("DEBUG: [FRONTEND] Settings State - Pages:", maxPages, "PanelsPerPage:", maxPanelsPerPage, "LayoutStyle:", layoutStyle);
+        const currentMaxPages = settings.max_pages || maxPages;
+        const requestedPanels = settings.panels_per_page || maxPanelsPerPage;
+
+        if (settings.max_pages) setMaxPages(settings.max_pages);
+        if (settings.panels_per_page) setMaxPanelsPerPage(settings.panels_per_page);
+        if (settings.layout_style) setLayoutStyle(settings.layout_style);
+
+        // Actualizamos el indicador de páginas activas para dar feedback inmediato.
+        // Si es una regeneración total, es obligatorio. Si es parcial (una página),
+        // también lo hacemos para que el indicador de navegación refleje la nueva estructura.
+        setActiveMaxPages(currentMaxPages);
+
+        // Si la página actual queda fuera del nuevo rango (ej: redujiste de 5 a 3 páginas),
+        // volvemos a la página 1 para evitar errores visuales.
+        if (currentPage > currentMaxPages) {
+            setCurrentPage(1);
+        }
 
         // Si estamos regenerando una página específica, el max_panels del payload 
         // debería representar el total esperado tras el cambio, o simplemente le pasamos
-        const currentMaxPages = settings.max_pages || maxPages;
-        const requestedPanels = settings.panels_per_page || maxPanelsPerPage;
 
         // El "techo" del proyecto: el mayor entre lo pedido y lo que ya existe en otras páginas
         const actualPanelsInOtherPages = pages
@@ -128,7 +159,8 @@ function App() {
             .reduce((max, p) => Math.max(max, p.panels.length), 0);
         const projectDensity = Math.max(requestedPanels, actualPanelsInOtherPages);
 
-        // Calcular el total de paneles sumando lo que se queda + lo que se va a crear
+        // Si es regeneración de página individual, usamos lo que ya tiene el proyecto para el resto
+        // Si es regeneración total, usamos lo propuesto
         const currentMaxPanels = settings.page_number
             ? (panels.filter(p => p.page_number !== settings.page_number).length + requestedPanels)
             : (currentMaxPages * requestedPanels);
@@ -138,7 +170,7 @@ function App() {
         const config = {
             max_pages: currentMaxPages,
             max_panels: currentMaxPanels,
-            panels_per_page: requestedPanels, // ESTE es el que usa el backend para el bucle de creación
+            panels_per_page: requestedPanels,
             layout_style: settings.layout_style || layoutStyle,
             plan_only: settings.plan_only || false,
             page_number: settings.page_number,
@@ -172,6 +204,7 @@ function App() {
             console.error("Error generating comic:", error);
             setError("Error al iniciar la generación.");
             setLoading(false);
+            isGeneratingRef.current = false;
         }
     };
 
@@ -227,6 +260,7 @@ function App() {
                 if (response.data.status === 'failed') {
                     setError(response.data.last_error);
                     setLoading(false);
+                    isGeneratingRef.current = false;
                     setRegenerating(false);
                     if (pollingInterval.current) {
                         clearInterval(pollingInterval.current);
@@ -242,6 +276,7 @@ function App() {
                             if (updated) setSelectedPanel(updated);
                         }
                         setLoading(false);
+                        isGeneratingRef.current = false;
                         setRegenerating(false);
                         if (pollingInterval.current) {
                             clearInterval(pollingInterval.current);
@@ -367,8 +402,16 @@ function App() {
                             <input
                                 type="number"
                                 min="1" max="10"
-                                value={maxPages}
-                                onChange={(e) => setMaxPages(parseInt(e.target.value))}
+                                value={isNaN(maxPages) ? "" : maxPages}
+                                onChange={(e) => {
+                                    const val = e.target.value;
+                                    if (val === "") {
+                                        setMaxPages(NaN);
+                                    } else {
+                                        const n = parseInt(val);
+                                        if (!isNaN(n)) setMaxPages(n);
+                                    }
+                                }}
                                 className="w-full bg-gray-950 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:border-purple-500 outline-none"
                             />
                         </div>
@@ -416,7 +459,12 @@ function App() {
 
                 <div className="space-y-3">
                     <button
-                        onClick={() => handleGenerate({ plan_only: true, page_number: currentPage })}
+                        onClick={() => handleGenerate({
+                            plan_only: true,
+                            page_number: currentPage,
+                            max_pages: maxPages,
+                            panels_per_page: maxPanelsPerPage
+                        })}
                         disabled={loading}
                         className="w-full flex items-center justify-center gap-3 bg-gray-800 hover:bg-gray-700 text-purple-400 font-bold py-3 rounded-xl transition-all border border-purple-900/30 active:scale-95"
                     >
@@ -481,7 +529,7 @@ function App() {
                         </button>
                     </div>
 
-                    {viewMode === 'draft' && maxPages > 1 && (
+                    {viewMode === 'draft' && activeMaxPages > 1 && (
                         <div className="flex items-center gap-4 bg-gray-900 px-4 py-2 rounded-xl border border-gray-800 shadow-lg">
                             <button
                                 onClick={() => setCurrentPage(Math.max(1, currentPage - 1))}
@@ -490,10 +538,10 @@ function App() {
                             >
                                 <ChevronLeft size={20} />
                             </button>
-                            <span className="text-xs font-black text-purple-400 uppercase tracking-tighter">Página {currentPage} de {maxPages}</span>
+                            <span className="text-xs font-black text-purple-400 uppercase tracking-tighter">Página {currentPage} de {activeMaxPages}</span>
                             <button
-                                onClick={() => setCurrentPage(Math.min(maxPages, currentPage + 1))}
-                                disabled={currentPage === maxPages}
+                                onClick={() => setCurrentPage(Math.min(activeMaxPages, currentPage + 1))}
+                                disabled={currentPage === activeMaxPages}
                                 className="text-gray-500 hover:text-white disabled:opacity-30 transition-colors"
                             >
                                 <ChevronRight size={20} />

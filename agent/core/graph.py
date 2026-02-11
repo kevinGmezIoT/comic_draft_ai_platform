@@ -1,10 +1,11 @@
-from typing import TypedDict, List, Annotated
+from typing import TypedDict, List, Annotated, Dict
 from langgraph.graph import StateGraph, END
 from .adapters import get_image_adapter
-from .knowledge import KnowledgeManager, CharacterManager
+from .knowledge import KnowledgeManager, CharacterManager, StyleManager, CanonicalStore
 from langchain_openai import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, SystemMessage
+
 import json
 import os
 
@@ -27,36 +28,134 @@ class AgentState(TypedDict):
     max_panels: int
     layout_style: str # "dynamic" | "vertical" | "grid"
     world_model_summary: str
+    style_guide: str
     full_script: str
     script_outline: List[str]
     panels: List[Panel]
     merged_pages: List[dict] # [{page_number: 1, image_url: "..."}]
+    canvas_dimensions: str
     plan_only: bool = False
     current_step: str
+    continuity_state: Dict[str, Dict] # State tracking for Agent H
+    reference_images: List[str]
+    global_context: Dict # Optional metadata from backend
+
+class PromptBuilder:
+    """Agent F: Prompt Builder - Composes layered prompts for image generation."""
+    def __init__(self, project_id: str):
+        self.cm = CharacterManager(project_id)
+        self.sm = StyleManager(project_id)
+        
+    def build_panel_prompt(self, panel: Panel, world_summary: str, continuity_state: Dict) -> str:
+        # Layer 1: Style
+        style_part = self.sm.get_style_prompt()
+        
+        # Layer 2: Characters (Canonical Traits + Continuity)
+        char_parts = []
+        char_names = panel.get("characters", [])
+        for char_name in char_names:
+            base_char = self.cm.get_character_prompt_segment(char_name)
+            # Add continuity state (Agent H)
+            char_state = continuity_state.get(char_name, {})
+            state_str = ""
+            if char_state:
+                state_items = [f"{k}: {v}" for k, v in char_state.items()]
+                state_str = f" Estado actual: {', '.join(state_items)}."
+            char_parts.append(f"{base_char}{state_str}")
+            
+        # Layer 3: Scene Action & Setting (Base)
+        scene_desc = panel.get('scene_description', 'Cinematic comic scene')
+        
+        # Layer 4: Composition & Reasoning (Agent F Art Direction)
+        layout = panel.get("layout", {"w": 50, "h": 50})
+        w, h = layout.get("w", 50), layout.get("h", 50)
+        aspect_ratio = "1:1"
+        if w / h > 1.2: aspect_ratio = "16:9"
+        elif h / w > 1.2: aspect_ratio = "9:16"
+
+        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.3)
+        reasoning_prompt = f"""
+        Actúa como un Director de Fotografía de Cómics (Agent F: Prompt Builder).
+        ESCENA: {scene_desc}
+        PERSONAJES: {", ".join(char_names)}
+        CONTEXTO MUNDO: {world_summary[:300]}
+        ESTILO BASE: {style_part}
+        DISEÑO PANEL: {w}% de ancho x {h}% de alto ({aspect_ratio}).
+        RASGOS CANÓNICOS: {" ".join(char_parts)}
+        
+        Genera un PROMPT VISUAL FINAL para Stable Diffusion / DALL-E.
+        Mejora la composición, iluminación y ángulo de cámara para este layout.
+        Responde ÚNICAMENTE con el prompt en inglés o español según sea más efectivo para la IA de imagen.
+        """
+        try:
+            visual_prompt = llm.invoke(reasoning_prompt).content.strip()
+            return visual_prompt
+        except Exception as e:
+            print(f"Error in PromptBuilder reasoning: {e}")
+            # Fallback a prompt estructurado básico
+            return f"{style_part}\nEscena: {scene_desc}. {' '.join(char_parts)}\nCinematic composition {aspect_ratio}."
+
+class ContinuitySupervisor:
+    """Agent H: Continuity Supervisor - Tracks and validates state between panels."""
+    def __init__(self, project_id: str):
+        self.canon = CanonicalStore(project_id)
+        
+    def update_state(self, current_state: Dict, panel: Panel) -> Dict:
+        # Simple LLM logic to update state based on panel action
+        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        
+        prompt = f"""
+        Actualiza el estado de continuidad basándote en la acción del panel.
+        ESTADO ANTERIOR: {json.dumps(current_state)}
+        ACCIÓN DEL PANEL: {panel['scene_description']}
+        PERSONAJES: {", ".join(panel.get('characters', []))}
+        
+        Identifica cambios en: ropa, heridas, objetos en mano, o ubicación.
+        Responde en JSON con el nuevo estado consolidado.
+        """
+        try:
+            res = llm.invoke(prompt)
+            new_state = json.loads(res.content.replace("```json", "").replace("```", ""))
+            return new_state
+        except:
+            return current_state
 
 def ingest_and_rag(state: AgentState):
     print("--- RAG & INGESTION ---")
     km = KnowledgeManager(state["project_id"])
-    km.ingest_from_urls(state["sources"])
+    vectorstore, image_paths = km.ingest_from_urls(state["sources"])
     
-    # Extraer el resumen del mundo
-    world_info = km.query_world_rules("Describe el estilo artístico, personajes principales y escenarios.")
-    summary = "\n".join([doc.page_content for doc in world_info])
+    summary = ""
+    full_script = ""
     
-    # Extraer específicamente el guión/trama
-    script_info = km.query_world_rules("Extrae el guión completo o la trama detallada de la historia.")
-    full_script = "\n".join([doc.page_content for doc in script_info])
+    if vectorstore:
+        # Extraer el resumen del mundo
+        world_info = km.query_world_rules("Describe el estilo artístico, personajes principales y escenarios.")
+        summary = "\n".join([doc.page_content for doc in world_info])
+        
+        # Extraer guión
+        script_info = km.query_world_rules("Extrae el guión completo o la trama detallada de la historia.")
+        full_script = "\n".join([doc.page_content for doc in script_info])
+    
+    # Normalizar estilo (Agent B)
+    sm = StyleManager(state["project_id"])
+    sm.normalize_style(summary)
     
     return {
         "current_step": "world_model_builder", 
         "world_model_summary": summary,
-        "full_script": full_script
+        "full_script": full_script,
+        "reference_images": image_paths
     }
 
 def world_model_builder(state: AgentState):
     print("--- WORLD MODEL BUILDING (Characters & Scenarios) ---")
     cm = CharacterManager(state["project_id"])
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    
+    # Pre-cargar personajes conocidos desde el backend si existen
+    backend_chars = state.get("global_context", {}).get("characters", [])
+    known_character_images = {c["name"].lower(): [c["image_url"]] for c in backend_chars if c.get("image_url")}
     
     prompt = f"""
     Basándote en este resumen del mundo, identifica a los personajes principales.
@@ -65,8 +164,10 @@ def world_model_builder(state: AgentState):
     RESUMEN:
     {state['world_model_summary']}
     
+    IMÁGENES DE REFERENCIA DISPONIBLES (archivos): {", ".join([os.path.basename(p) for p in state.get("reference_images", [])])}
+    
     Responde en formato JSON:
-    {{"characters": [{{"name": "...", "description": "..."}}]}}
+    {{"characters": [{{"name": "...", "description": "...", "suggested_image_file": "nombre_archivo_o_null"}}]}}
     """
     
     try:
@@ -76,13 +177,39 @@ def world_model_builder(state: AgentState):
             content = content[7:-3].strip()
         data = json.loads(content)
         
+        ref_images = state.get("reference_images", [])
+        
         for char in data.get("characters", []):
-            cm.register_character(char["name"], char["description"], [])
-            print(f"Registered character: {char['name']}")
+            name = char["name"]
+            description = char["description"]
+            images = []
+            
+            # 1. Intentar match con backend
+            if name.lower() in known_character_images:
+                images.extend(known_character_images[name.lower()])
+            
+            # 2. Intentar match con archivos subidos (via sugerencia del LLM o nombre)
+            suggested_file = char.get("suggested_image_file")
+            if suggested_file and suggested_file != "null":
+                for p in ref_images:
+                    if suggested_file in p:
+                        images.append(p)
+                        break
+            
+            # Fallback: buscar por nombre en los archivos
+            if not images:
+                for p in ref_images:
+                    if name.lower() in p.lower():
+                        images.append(p)
+                        break
+
+            cm.register_character(name, description, list(set(images)))
+            print(f"Registered character: {name} with {len(images)} images.")
+            
     except Exception as e:
         print(f"Error extracting characters: {e}")
         
-    return {"current_step": "planner"}
+    return {"current_step": "planner", "continuity_state": {}, "canvas_dimensions": "800x1100 (A4)"}
 
 def planner(state: AgentState):
     existing_panels = state.get("panels", [])
@@ -97,22 +224,19 @@ def planner(state: AgentState):
         preserved_panels = [p for p in existing_panels if p.get("page_number") != target_page]
         print(f"DEBUG: [SCOPED PLANNING] Preserving {len(preserved_panels)} panels from other pages. Target Page: {target_page}")
 
-    # Si ya tenemos paneles con IDs reales (UUIDs) y descripción, probablemente 
-    # venimos de una edición manual o regeneración de arte selectiva.
-    # En ese caso, SOLO planificamos si nos falta algún panel o si nos piden explícitamente re-planear (cambiando max_panels).
-    # Solo saltamos planificación estratégica si NO estamos pidiendo un plan explícitamente (plan_only=True)
-    # y si tenemos paneles existentes que coinciden con el conteo deseado (o no hay conteo rígido).
-    # REGLA DE SALTO: 
-    # Solo saltamos la planificación estratégica si YA tenemos paneles Y NO estamos en un modo de planificación (plan_only).
     if len(existing_panels) > 0 and not target_page and not state.get("plan_only"):
         # Verificación profunda: ¿Son estos paneles reales del guion o son basura/fallbacks?
+        # AHORA: Si tienen un layout definido (w > 0), asumimos que el usuario los quiere preservar,
+        # incluso si el texto es temporal.
+        has_manual_layout = any(p.get("layout") and float(str(p.get("layout", {}).get("w", 0))) > 0 for p in existing_panels)
+        
         is_placeholder = any("placeholder" in str(p.get("scene_description", "") + p.get("prompt", "")).lower() for p in existing_panels)
         
-        # Detectar si los paneles actuales vienen del fallback hardcoded del Detective (usado en versiones previas de knowledge.py)
+        # Detectar si los paneles actuales vienen del fallback hardcoded del Detective
         is_fallback_content = any(kw in str(p.get("scene_description", "")).lower() for p in existing_panels for kw in ["detective", "avatar holográfico", "brazo robótico", "esquinas filosas"])
         
-        if not is_placeholder and not is_fallback_content:
-            print(f"--- SKIPPING STRATEGIC PLANNING (Already have {len(existing_panels)} real panels) ---")
+        if (not is_placeholder and not is_fallback_content) or has_manual_layout:
+            print(f"--- SKIPPING STRATEGIC PLANNING (Preserving {len(existing_panels)} panels. Manual Layout: {has_manual_layout}) ---")
             return {"panels": existing_panels, "current_step": "layout_designer"}
         else:
             reason = "placeholders" if is_placeholder else "fallback content (Detective/IA)"
@@ -226,7 +350,9 @@ def planner(state: AgentState):
         }
 
         for i, p in enumerate(panels):
-            p.setdefault("id", f"p_{i}")
+            # Standardize ID as string to avoid type mismatch (int vs str)
+            p_id = str(p.get("id")) if p.get("id") else f"p_{i}"
+            p["id"] = p_id
             p.setdefault("image_url", "")
             p.setdefault("status", "pending")
             p.setdefault("characters", [])
@@ -257,72 +383,46 @@ def planner(state: AgentState):
         raise e
 
 def image_generator(state: AgentState):
-    print("--- MULTIMODAL IMAGE GENERATION ---")
+    print("--- AGENT F & H: MULTIMODAL IMAGE GENERATION ---")
     adapter = get_image_adapter()
-    cm = CharacterManager(state["project_id"])
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.3)
+    pb = PromptBuilder(state["project_id"])
+    cs = ContinuitySupervisor(state["project_id"])
     
     updated_panels = []
-    # Ordenar por página y orden de forma defensiva
+    continuity = state.get("continuity_state", {})
+    
     sorted_panels = sorted(state["panels"], key=lambda x: (x.get('page_number', 1), x.get('order_in_page', 0)))
     
     for panel in sorted_panels:
-        print(f"DEBUG: Image Generator Input -> Panel: {panel.get('id')}, Layout: {panel.get('layout')}")
-        # Lógica de salto: Si tiene imagen y NO está pendiente de regenerar, saltar.
         if panel.get("image_url") and panel.get("status") not in ["pending", "editing"]:
             updated_panels.append(panel)
             continue
 
-        # 1. Razonamiento Multimodal: GPT-4o-mini para potenciar el prompt visual según el layout
+        # Agent H: Update continuity based on the action
+        continuity = cs.update_state(continuity, panel)
+        
+        # Agent F: Build Layered Prompt
+        augmented_prompt = pb.build_panel_prompt(panel, state["world_model_summary"], continuity)
+        print(f"DEBUG: Layered Prompt for Panel {panel['id']}: {augmented_prompt[:100]}...")
+
+        # Image Generation
         layout = panel.get("layout", {"w": 50, "h": 50})
         w, h = layout.get("w", 50), layout.get("h", 50)
-        
-        # Determinar aspect ratio para el modelo de imagen
         aspect_ratio = "1:1"
         if w / h > 1.2: aspect_ratio = "16:9"
         elif h / w > 1.2: aspect_ratio = "9:16"
 
-        char_names = panel.get("characters", [])
-        char_descriptions = [cm.get_character_prompt_segment(c) for c in char_names]
-        
-        reasoning_prompt = f"""
-        Actúa como un Director de Fotografía de Cómics. 
-        ESCENA: {panel['scene_description']}
-        PERSONAJES: {", ".join(char_names)}
-        CONTEXTO MUNDO: {state['world_model_summary'][:300]}
-        DISEÑO PANEL: {w}% de ancho x {h}% de alto.
-        
-        Genera un PROMPT VISUAL altamente detallado para una IA generadora de imágenes. 
-        Enfócate en la composición cinematográfica que mejor se adapte a un panel de estas dimensiones ({aspect_ratio}).
-        Incluye detalles del estilo artístico de la obra, iluminación, ángulo de cámara y las descripciones de los personajes:
-        {" ".join(char_descriptions)}
-        
-        Responde ÚNICAMENTE con el prompt final.
-        """
-        
-        try:
-            visual_reasoning = llm.invoke(reasoning_prompt).content.strip()
-            print(f"DEBUG: Multimodal Insight for Panel {panel['id']}: {visual_reasoning[:50]}...")
-        except Exception as e:
-            print(f"ERROR: Multimodal reasoning failed for panel {panel['id']}: {e}")
-            # Si el prompt original es un placeholder, lanzamos error porque no queremos basura
-            if "placeholder" in panel.get('prompt', '').lower():
-                raise ValueError(f"No se pudo generar un prompt real para el panel {panel['id']} y el original era un placeholder.")
-            visual_reasoning = panel['prompt']
-
-        # 2. Generación de Imagen con Aspect Ratio
         if panel.get("image_url") and panel["status"] == "editing":
-            url = adapter.edit_image(panel["image_url"], visual_reasoning)
+            url = adapter.edit_image(panel["image_url"], augmented_prompt)
         else:
-            url = adapter.generate_image(visual_reasoning, aspect_ratio=aspect_ratio)
+            url = adapter.generate_image(augmented_prompt, aspect_ratio=aspect_ratio)
             
         panel["image_url"] = url
         panel["status"] = "generated"
-        # Actualizar el prompt con el razonamiento visual para persistencia
-        panel["prompt"] = visual_reasoning
+        panel["prompt"] = augmented_prompt
         updated_panels.append(panel)
         
-    return {"panels": updated_panels, "current_step": "balloons"}
+    return {"panels": updated_panels, "continuity_state": continuity, "current_step": "balloons"}
 
 def layout_designer(state: AgentState):
     print("--- DEFINING PAGE LAYOUTS (Templates) ---")
@@ -580,12 +680,14 @@ def balloon_generator(state: AgentState):
             content = content[7:-3].strip()
         data = json.loads(content)
         
-        # Mapear balloons de vuelta a los paneles
-        balloons_map = {p["id"]: p["balloons"] for p in data.get("panels", [])}
+        # Mapear balloons de vuelta a los paneles usando IDs como strings
+        balloons_map = {str(p["id"]): p["balloons"] for p in data.get("panels", [])}
         
         updated_panels = []
         for p in state["panels"]:
-            p["balloons"] = balloons_map.get(p["id"], [])
+            p_id = str(p["id"])
+            p["balloons"] = balloons_map.get(p_id, [])
+            print(f"DEBUG: Panel {p_id} got {len(p['balloons'])} balloons.")
             updated_panels.append(p)
             
         return {"panels": updated_panels, "current_step": "merger"}

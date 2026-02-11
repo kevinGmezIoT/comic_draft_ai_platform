@@ -29,3 +29,5 @@ Thumbs.db
 
 # Private Docs
 FIRST_STEPS.md
+
+.bedrock_agentcore.yaml

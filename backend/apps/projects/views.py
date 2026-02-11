@@ -1,9 +1,12 @@
 import requests
+import threading
 from django.conf import settings
+from .agent_utils import BedrockAgentClient
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from .models import Project, Page, Panel, Character, Scenery
+from .result_processor import process_agent_result
 
 class GenerateComicView(APIView):
     def post(self, request, project_id):
@@ -164,16 +167,29 @@ class GenerateComicView(APIView):
             }
         }
 
-        print(f"DEBUG: Enviando peticion al Agent en {agent_url}")
+        print(f"DEBUG: Enviando peticion al Bedrock Agent: {project.id}")
         try:
             project.status = "generating"
             project.last_error = None
             project.save()
-            response = requests.post(agent_url, json=payload, timeout=10)
-            return Response(response.json(), status=status.HTTP_202_ACCEPTED)
-        except requests.exceptions.RequestException as e:
-            print(f"ERROR: Fallo al conectar con el Agent: {str(e)}")
-            return Response({"error": f"Agent service unavailable: {str(e)}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+            # Invocar al agente en un hilo separado para no bloquear la respuesta HTTP
+            # El agente notificará al AgentCallbackView cuando termine
+            client = BedrockAgentClient()
+            thread = threading.Thread(
+                target=client.invoke,
+                args=(payload, project.id)
+            )
+            thread.start()
+
+            return Response({
+                "project_id": str(project.id),
+                "status": "queued",
+                "message": "Generation process started in Bedrock Agent"
+            }, status=status.HTTP_202_ACCEPTED)
+        except Exception as e:
+            print(f"ERROR: Fallo al invocar al Bedrock Agent: {str(e)}")
+            return Response({"error": f"Bedrock Agent error: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 class ProjectDetailView(APIView):
     """Obtén el estado actual del cómic (páginas y paneles)"""
@@ -245,98 +261,14 @@ class ProjectDetailView(APIView):
 class AgentCallbackView(APIView):
     """Webhook para que el Agente notifique resultados"""
     def post(self, request, project_id):
+        print(f"DEBUG: [CALLBACK] Received request for project {project_id}")
         try:
-            project = Project.objects.get(id=project_id)
-            status_received = request.data.get('status')
+            result = process_agent_result(project_id, request.data)
             
-            if status_received == 'failed':
-                error_msg = request.data.get('error', 'Unknown Error')
-                project.status = 'failed'
-                project.last_error = error_msg
-                project.save()
-                return Response({"status": "error_logged"}, status=status.HTTP_200_OK)
-
-            result = request.data.get('result', {})
-            # Organizar por páginas y paneles
-            panels_data = result.get('panels', [])
-            
-            if not panels_data or len(panels_data) == 0:
-                project.status = 'failed'
-                project.last_error = "El Agente no pudo generar una maquetación válida (0 paneles)."
-                project.save()
-                return Response({"status": "no_panels_found"}, status=status.HTTP_200_OK)
-
-            # Agrupar por página
-            pages_map = {}
-            processed_panel_ids = []
-            
-            for p_data in panels_data:
-                p_num = p_data.get('page_number', 1)
-                if p_num not in pages_map:
-                    page, _ = Page.objects.get_or_create(project=project, page_number=p_num)
-                    pages_map[p_num] = page
-                
-                # Sincronización robusta: Intentar por ID si existe, sino por orden en página
-                panel_id = p_data.get('id')
-                panel = None
-                
-                if panel_id and len(str(panel_id)) > 30: # Es un UUID probable
-                    panel = Panel.objects.filter(id=panel_id).first()
-                
-                if not panel:
-                    panel, created = Panel.objects.update_or_create(
-                        page=pages_map[p_num],
-                        order=p_data.get('order_in_page', 0),
-                        defaults={
-                            "prompt": p_data.get('prompt', 'Cinematic comic panel'),
-                            "scene_description": p_data.get('scene_description', ''),
-                            "balloons": p_data.get('balloons', []),
-                            "layout": p_data.get('layout', {}),
-                            "status": "completed"
-                        }
-                    )
-                else:
-                    # Actualizar existente
-                    panel.prompt = p_data.get('prompt', panel.prompt)
-                    panel.scene_description = p_data.get('scene_description', '')
-                    panel.balloons = p_data.get('balloons', [])
-                    panel.layout = p_data.get('layout', {})
-                    panel.status = "completed"
-                    panel.order = p_data.get('order_in_page', panel.order)
-                    panel.save()
-                
-                processed_panel_ids.append(panel.id)
-                
-                if p_data.get('image_url'):
-                    panel.image.name = p_data['image_url']
-                    panel.save()
-
-            # RECONCILIACIÓN: 
-            # 1. Eliminar paneles que el agente ya no reporta en las páginas que se han tocado
-            for p_num, page in pages_map.items():
-                page.panels.exclude(id__in=processed_panel_ids).delete()
-            
-            # 2. Eliminar páginas excedentes (Si el agente reportó menos páginas o si estamos reorganizando)
-            # Esto soluciona que si pasas de 3 a 2 páginas, la 3ra página vacía desaparezca.
-            project.pages.exclude(page_number__in=pages_map.keys()).delete()
-            
-            # Guardar URLs de páginas fusionadas (Organic Merge)
-            merged_pages_data = result.get('merged_pages', [])
-            for m_data in merged_pages_data:
-                p_num = m_data.get('page_number')
-                page = Page.objects.filter(project=project, page_number=p_num).first()
-                if page:
-                    image_url = m_data.get('image_url', '')
-                    if image_url:
-                        page.merged_image.name = image_url
-                    page.save()
-
-            # FINALMENTE marcar como completado después de salvar todo
-            project.status = 'completed'
-            project.last_error = None
-            project.save()
-            
-            return Response({"status": "received"}, status=status.HTTP_200_OK)
+            if result.get("status") == "success":
+                return Response({"status": "received"}, status=status.HTTP_200_OK)
+            else:
+                return Response(result, status=status.HTTP_400_BAD_REQUEST)
         except Project.DoesNotExist:
             return Response({"error": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
 
@@ -545,10 +477,12 @@ class RegeneratePanelView(APIView):
             project.status = "generating"
             project.save()
             
-            response = requests.post(agent_url, json=payload, timeout=10)
-            return Response(response.json(), status=status.HTTP_202_ACCEPTED)
-        except Panel.DoesNotExist:
-            return Response({"error": "Panel not found"}, status=status.HTTP_404_NOT_FOUND)
+            client = BedrockAgentClient()
+            threading.Thread(target=client.invoke, args=(payload, project.id)).start()
+            
+            return Response({"status": "queued", "panel_id": panel.id}, status=status.HTTP_202_ACCEPTED)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 class RegenerateMergedPagesView(APIView):
     """Dispara la regeneración del organic merge de una página o proyecto"""
@@ -566,10 +500,12 @@ class RegenerateMergedPagesView(APIView):
             project.status = "generating"
             project.save()
             
-            response = requests.post(agent_url, json=payload, timeout=10)
-            return Response(response.json(), status=status.HTTP_202_ACCEPTED)
-        except Project.DoesNotExist:
-            return Response({"error": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+            client = BedrockAgentClient()
+            threading.Thread(target=client.invoke, args=(payload, project.id)).start()
+            
+            return Response({"status": "queued", "project_id": str(project.id)}, status=status.HTTP_202_ACCEPTED)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 class ProjectNoteView(APIView):
     def post(self, request, project_id):

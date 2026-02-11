@@ -25,6 +25,9 @@ dependencies = [
     "pillow>=12.1.0",
     "langchain-google-genai>=4.2.0",
     "google-genai>=1.62.0",
+    "bedrock-agentcore>=1.2.1",
+    "bedrock-agentcore-starter-toolkit>=0.2.10",
+    "aws-opentelemetry-distro>=0.15.0",
 ]
 
 [tool.uv]
