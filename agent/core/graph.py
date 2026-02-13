@@ -77,11 +77,12 @@ class PromptBuilder:
         reasoning_prompt = f"""
         Actúa como un Director de Fotografía de Cómics (Agent F: Prompt Builder).
         ESCENA: {scene_desc}
-        PERSONAJES: {", ".join(char_names)}
+        ESCENARIO: {panel['scenery']}
+        PERSONAJES: {", ".join(char_names) if len(char_names) > 0 else "Sin personaje"}
         CONTEXTO MUNDO: {world_summary[:300]}
         ESTILO BASE: {style_part}
         DISEÑO PANEL: {w}% de ancho x {h}% de alto ({aspect_ratio}).
-        RASGOS CANÓNICOS: {" ".join(char_parts)}
+        RASGOS CANÓNICOS: {" ".join(char_parts) if len(char_parts) > 0 else "Sin personaje"}
         
         Genera un PROMPT VISUAL FINAL para Stable Diffusion / DALL-E.
         Mejora la composición, iluminación y ángulo de cámara para este layout.
@@ -125,15 +126,38 @@ def ingest_and_rag(state: AgentState):
     km = KnowledgeManager(state["project_id"])
     vectorstore, image_paths = km.ingest_from_urls(state["sources"])
     
-    summary = ""
+    global_ctx = state.get("global_context", {})
+    summary_parts = []
+    
+    # 1. Prioritize Global Context (Manually entered info)
+    if global_ctx.get("description"):
+        summary_parts.append(f"SYNOPSIS / DESCRIPTION: {global_ctx['description']}")
+    if global_ctx.get("world_bible"):
+        summary_parts.append(f"WORLD BIBLE: {global_ctx['world_bible']}")
+    if global_ctx.get("style_guide"):
+        summary_parts.append(f"STYLE GUIDE: {global_ctx['style_guide']}")
+        
+    # Append Characters from Context
+    if global_ctx.get("characters"):
+        char_info = "CHARACTERS:\n" + "\n".join([f"- {c['name']}: {c.get('description', '')}" for c in global_ctx["characters"]])
+        summary_parts.append(char_info)
+        
+    # Append Sceneries from Context
+    if global_ctx.get("sceneries"):
+        scene_info = "SCENERIES:\n" + "\n".join([f"- {s['name']}: {s.get('description', '')}" for s in global_ctx["sceneries"]])
+        summary_parts.append(scene_info)
+    
+    summary = "\n\n".join(summary_parts)
     full_script = ""
     
+    # 2. Augment with RAG if vectorstore exists
     if vectorstore:
-        # Extraer el resumen del mundo
-        world_info = km.query_world_rules("Describe el estilo artístico, personajes principales y escenarios.")
-        summary = "\n".join([doc.page_content for doc in world_info])
-        
-        # Extraer guión
+        # Extraer info adicional del mundo si no hay suficiente en el contexto
+        if not summary:
+            world_info = km.query_world_rules("Describe el estilo artístico, personajes principales y escenarios.")
+            summary = "\n".join([doc.page_content for doc in world_info])
+            
+        # Extraer guión (El guión suele venir del documento subido)
         script_info = km.query_world_rules("Extrae el guión completo o la trama detallada de la historia.")
         full_script = "\n".join([doc.page_content for doc in script_info])
     
@@ -159,7 +183,7 @@ def world_model_builder(state: AgentState):
     
     prompt = f"""
     Basándote en este resumen del mundo, identifica a los personajes principales.
-    Para cada personaje, extrae su nombre y una descripción física detallada para generación de imágenes.
+    Para cada personaje, extrae su nombre en una sola palabra y una descripción física detallada para generación de imágenes.
     
     RESUMEN:
     {state['world_model_summary']}
@@ -167,7 +191,7 @@ def world_model_builder(state: AgentState):
     IMÁGENES DE REFERENCIA DISPONIBLES (archivos): {", ".join([os.path.basename(p) for p in state.get("reference_images", [])])}
     
     Responde en formato JSON:
-    {{"characters": [{{"name": "...", "description": "...", "suggested_image_file": "nombre_archivo_o_null"}}]}}
+    {{"characters": [{{"name": "primer nombre del personaje (Una sola palabra)", "description": "..."}}]}}
     """
     
     try:
@@ -184,9 +208,16 @@ def world_model_builder(state: AgentState):
             description = char["description"]
             images = []
             
-            # 1. Intentar match con backend
-            if name.lower() in known_character_images:
-                images.extend(known_character_images[name.lower()])
+            # 1. Intentar match con backend (Mejorado: match parcial)
+            matched_url = None
+            for b_name, b_urls in known_character_images.items():
+                if name.lower() in b_name or b_name in name.lower():
+                    matched_url = b_urls[0]
+                    print(f"DEBUG: Character '{name}' matched with backend character '{b_name}'")
+                    break
+            
+            if matched_url:
+                images.append(matched_url)
             
             # 2. Intentar match con archivos subidos (via sugerencia del LLM o nombre)
             suggested_file = char.get("suggested_image_file")
@@ -194,6 +225,7 @@ def world_model_builder(state: AgentState):
                 for p in ref_images:
                     if suggested_file in p:
                         images.append(p)
+                        print(f"DEBUG: Character '{name}' matched with suggested file '{suggested_file}'")
                         break
             
             # Fallback: buscar por nombre en los archivos
@@ -201,10 +233,12 @@ def world_model_builder(state: AgentState):
                 for p in ref_images:
                     if name.lower() in p.lower():
                         images.append(p)
+                        print(f"DEBUG: Character '{name}' matched by name in file '{p}'")
                         break
 
-            cm.register_character(name, description, list(set(images)))
-            print(f"Registered character: {name} with {len(images)} images.")
+            unique_images = list(set(images))
+            cm.register_character(name, description, unique_images)
+            print(f"Registered character: {name} with {len(unique_images)} images. URLs: {unique_images}")
             
     except Exception as e:
         print(f"Error extracting characters: {e}")
@@ -223,24 +257,6 @@ def planner(state: AgentState):
         # Preservar todos los paneles que NO son de la página objetivo
         preserved_panels = [p for p in existing_panels if p.get("page_number") != target_page]
         print(f"DEBUG: [SCOPED PLANNING] Preserving {len(preserved_panels)} panels from other pages. Target Page: {target_page}")
-
-    if len(existing_panels) > 0 and not target_page and not state.get("plan_only"):
-        # Verificación profunda: ¿Son estos paneles reales del guion o son basura/fallbacks?
-        # AHORA: Si tienen un layout definido (w > 0), asumimos que el usuario los quiere preservar,
-        # incluso si el texto es temporal.
-        has_manual_layout = any(p.get("layout") and float(str(p.get("layout", {}).get("w", 0))) > 0 for p in existing_panels)
-        
-        is_placeholder = any("placeholder" in str(p.get("scene_description", "") + p.get("prompt", "")).lower() for p in existing_panels)
-        
-        # Detectar si los paneles actuales vienen del fallback hardcoded del Detective
-        is_fallback_content = any(kw in str(p.get("scene_description", "")).lower() for p in existing_panels for kw in ["detective", "avatar holográfico", "brazo robótico", "esquinas filosas"])
-        
-        if (not is_placeholder and not is_fallback_content) or has_manual_layout:
-            print(f"--- SKIPPING STRATEGIC PLANNING (Preserving {len(existing_panels)} panels. Manual Layout: {has_manual_layout}) ---")
-            return {"panels": existing_panels, "current_step": "layout_designer"}
-        else:
-            reason = "placeholders" if is_placeholder else "fallback content (Detective/IA)"
-            print(f"--- CONTINUING TO PLANNING (Found {reason}) ---")
 
     if target_page:
         preserved_panels = [p for p in existing_panels if p.get("page_number") != target_page]
@@ -268,7 +284,7 @@ def planner(state: AgentState):
     SUMMARY:
     {state['world_model_summary']}
     
-    SCRIPT:
+    SCRIPT (Separado en páginas y descriciones de viñetas de cada página):
     {state['full_script']}
     
     TAMAÑO DE PÁGINA RECOMENDADO: {state.get('canvas_dimensions', '800x1100 (A4)')}
@@ -282,7 +298,6 @@ def planner(state: AgentState):
     - **ÍNDICE DE ORDEN (CRÍTICO)**: El campo `order_in_page` DEBE EMPEZAR EN 0 para el primer panel de cada página. (Ej: 0, 1, 2...). No empieces en 1.
     - Si el número total de paneles es {state.get('max_panels', 0)} y tienes {state.get('max_pages', 3)} páginas, asegúrate de que el campo `page_number` avance lógicamente.
     - **CONTINUIDAD**: Si estás generando el cómic completo, el primer panel de la Página 2 debe ser la continuación inmediata del último panel de la Página 1.
-    - **LIMITACIÓN**: Si el guion es muy largo y el espacio es pequeño, enfócate en cubrir el INICIO de la historia. No resumas todo el guion si eso implica perder el detalle visual de las escenas iniciales.
     
     FORMATO JSON OBLIGATORIO:
     {{
@@ -291,7 +306,10 @@ def planner(state: AgentState):
                 "page_number": 1,
                 "order_in_page": 0,
                 "scene_description": "Descripción detallada de la escena...",
-                "characters": ["Nombre del Personaje"]
+                "script": "parte del guión que describe el panel o viñeta",
+                "characters": ["Nombre del Personaje"],
+                "scenery": "Lugar donde se desarrolla este panel o viñeta",
+                "style": "Estilo de dibujo"
             }}
         ]
     }}
@@ -393,6 +411,9 @@ def image_generator(state: AgentState):
     
     sorted_panels = sorted(state["panels"], key=lambda x: (x.get('page_number', 1), x.get('order_in_page', 0)))
     
+    # Identificar personajes y sus imágenes de referencia para contexto multimodal
+    cm = pb.cm # Usar el CharacterManager de PromptBuilder
+    
     for panel in sorted_panels:
         if panel.get("image_url") and panel.get("status") not in ["pending", "editing"]:
             updated_panels.append(panel)
@@ -403,7 +424,20 @@ def image_generator(state: AgentState):
         
         # Agent F: Build Layered Prompt
         augmented_prompt = pb.build_panel_prompt(panel, state["world_model_summary"], continuity)
-        print(f"DEBUG: Layered Prompt for Panel {panel['id']}: {augmented_prompt[:100]}...")
+        
+        # Coleccionar imágenes de contexto (Personajes del panel)
+        context_images = []
+        for char_name in panel.get("characters", []):
+            char_refs = cm.get_character_images(char_name)
+            if char_refs:
+                context_images.extend(char_refs)
+        
+        # Eliminar duplicados manteniendo orden
+        seen = set()
+        unique_context = [x for x in context_images if not (x in seen or seen.add(x))]
+        
+        print(f"DEBUG: Panel {panel['id']} Context Images ({len(unique_context)}): {unique_context}")
+        print(f"DEBUG: Augmented Prompt: {augmented_prompt[:150]}...")
 
         # Image Generation
         layout = panel.get("layout", {"w": 50, "h": 50})
@@ -415,7 +449,7 @@ def image_generator(state: AgentState):
         if panel.get("image_url") and panel["status"] == "editing":
             url = adapter.edit_image(panel["image_url"], augmented_prompt)
         else:
-            url = adapter.generate_image(augmented_prompt, aspect_ratio=aspect_ratio)
+            url = adapter.generate_panel(augmented_prompt, aspect_ratio=aspect_ratio, context_images=unique_context)
             
         panel["image_url"] = url
         panel["status"] = "generated"
@@ -547,7 +581,12 @@ def page_merger(state: AgentState):
         
     merged_results = []
     
-    for page_num, panel_list in pages.items():
+        
+    last_page_s3_key = None
+    sorted_page_nums = sorted(pages.keys(), key=int)
+    
+    for page_num in sorted_page_nums:
+        panel_list = pages[page_num]
         print(f"Merging Page {page_num}...")
         
         # 1. Crear el collage base con globos (como guía para la IA)
@@ -599,11 +638,32 @@ def page_merger(state: AgentState):
         visual_blend_description = get_visual_blend_description(composite_b64, vision_prompt)
         print(f"Visual Blend Insight: {visual_blend_description[:100]}...")
 
-        merge_prompt = f"ORGANIC COMIC PAGE MERGE. Instrucciones visuales: {visual_blend_description}. Style: {state.get('world_model_summary', '')}. Professional comic art style."
+        merge_prompt = f"ORGANIC COMIC PAGE MERGE. \nInstrucciones visuales: {visual_blend_description} \nPágina en el guión: {page_num}\nStyle: {state.get('world_model_summary', '')}. Professional comic art style."
         
+        # CONTINUIDAD: Agregar la página anterior como referencia visual si existe
+        merge_context_images = []
+        bucket = os.getenv("AWS_STORAGE_BUCKET_NAME")
+
+        if last_page_s3_key:
+            prev_s3_uri = f"s3://{bucket}/{last_page_s3_key}"
+            print(f"DEBUG: Adding previous page (Pág {int(page_num)-1}) as continuity context: {prev_s3_uri}")
+            merge_context_images.append(prev_s3_uri)
+        
+        # También pasar opcionalmente el composite actual como contexto (como pide el usuario)
+        # s3:// temporary local paths don't work in context_images unless uploaded, 
+        # but the adapter can handle local paths too.
+        merge_context_images.append(composite_path)
+
         try:
-            # 2. Generar mezcla orgánica via Image-to-Image
-            raw_merged_s3_key = adapter.generate_image(merge_prompt, quality="hd", init_image_path=composite_path) 
+            # 2. Generar mezcla orgánica via Image-to-Image (especializado para fusión)
+            raw_merged_s3_key = adapter.generate_page_merge(
+                merge_prompt, 
+                init_image_path=composite_path, 
+                context_images=merge_context_images
+            ) 
+            
+            # Guardamos esta página para que sea referencia de la siguiente
+            last_page_s3_key = raw_merged_s3_key
             
             # Suponiendo que el adapter devuelve una clave de S3 (como 'generated/...'), 
             # necesitamos descargarla para el overlay.

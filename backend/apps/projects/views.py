@@ -150,22 +150,26 @@ class GenerateComicView(APIView):
             "plan_only": request.data.get("plan_only", False),
             "panels": request.data.get("panels", []),
             "global_context": {
+                "description": project.description,
                 "world_bible": project.world_bible,
                 "style_guide": project.style_guide,
                 "characters": [{
                     "name": c.name,
                     "description": c.description,
                     "metadata": c.metadata,
-                    "image_url": c.image_url
+                    "image_url": request.build_absolute_uri(c.image.url) if c.image else ""
                 } for c in project.characters.all()],
                 "sceneries": [{
                     "name": s.name,
                     "description": s.description,
                     "metadata": s.metadata,
-                    "image_url": s.image_url
+                    "image_url": request.build_absolute_uri(s.image.url) if s.image else ""
                 } for s in project.sceneries.all()]
             }
         }
+
+        import json
+        print(f"DEBUG: Payload sent to Agent: {json.dumps(payload, indent=2)}")
 
         print(f"DEBUG: Enviando peticion al Bedrock Agent: {project.id}")
         try:

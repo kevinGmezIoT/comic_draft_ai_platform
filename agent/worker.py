@@ -41,7 +41,18 @@ def generate_comic_logic(project_id, sources, max_pages=3, max_panels=None, layo
     }
 
     try:
-        result = graph.invoke(initial_state)
+        # LangSmith tracing metadata
+        config = {
+            "configurable": {"project_id": project_id},
+            "metadata": {
+                "project_id": project_id,
+                "action": "generate",
+                "max_pages": max_pages
+            },
+            "tags": ["comic-generation", f"project-{project_id}"]
+        }
+        
+        result = graph.invoke(initial_state, config=config)
         
         # Notify backend via SQS
         if queue_url:
@@ -105,7 +116,13 @@ def regenerate_panel_logic(project_id, panel_id, prompt, scene_description, ball
     }
     
     try:
-        updated_state = image_generator(state)
+        # LangSmith tracing for direct node call
+        from langsmith import traceable
+        @traceable(name="regenerate_panel", project_name=os.getenv("LANGCHAIN_PROJECT", "comic-draft-ai"))
+        def run_traced():
+            return image_generator(state)
+            
+        updated_state = run_traced()
         return updated_state
     except Exception as e:
         return {"error": str(e)}
@@ -136,7 +153,13 @@ def regenerate_merge_logic(project_id, instructions):
     }
     
     try:
-        updated_state = page_merger(state)
+        # LangSmith tracing for direct node call
+        from langsmith import traceable
+        @traceable(name="regenerate_merge", project_name=os.getenv("LANGCHAIN_PROJECT", "comic-draft-ai"))
+        def run_traced():
+            return page_merger(state)
+            
+        updated_state = run_traced()
         return updated_state
     except Exception as e:
         return {"error": str(e)}
@@ -164,7 +187,8 @@ def agent_invocation(payload, context):
                 max_panels=payload.get("max_panels"),
                 layout_style=payload.get("layout_style", "dynamic"),
                 plan_only=payload.get("plan_only", False),
-                panels=payload.get("panels", [])
+                panels=payload.get("panels", []),
+                global_context=payload.get("global_context", {})
             )
         elif action == "regenerate_panel":
             result = regenerate_panel_logic(

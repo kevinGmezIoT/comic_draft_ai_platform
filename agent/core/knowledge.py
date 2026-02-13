@@ -14,7 +14,7 @@ class KnowledgeManager:
         self.project_id = project_id
         self.persist_directory = f"./data/chroma/{project_id}"
         self.embeddings = OpenAIEmbeddings()
-        self.text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        self.text_splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=400)
 
     def _download_from_s3(self, s3_url: str):
         """Descarga un archivo de S3 a un directorio temporal y retorna la ruta local"""
@@ -51,20 +51,38 @@ class KnowledgeManager:
                 if url.startswith("s3://"):
                     local_url = self._download_from_s3(url)
                 elif url.startswith("http"):
-                    import requests
-                    from urllib.parse import urlparse
-                    
-                    parsed = urlparse(url)
-                    filename = os.path.basename(parsed.path) or "downloaded_file"
-                    temp_dir = "./data/temp_downloads"
-                    os.makedirs(temp_dir, exist_ok=True)
-                    local_url = os.path.join(temp_dir, filename)
-                    
-                    print(f"Downloading HTTP URL: {url} -> {local_url}")
-                    r = requests.get(url, stream=True)
-                    with open(local_url, 'wb') as f:
-                        for chunk in r.iter_content(chunk_size=8192):
-                            f.write(chunk)
+                    # Detectar si es una URL de S3
+                    if ".s3." in url or ".s3-" in url or "amazonaws.com" in url:
+                        from urllib.parse import urlparse
+                        parsed = urlparse(url)
+                        hostname = parsed.netloc
+                        if hostname.endswith(".amazonaws.com"):
+                            parts = hostname.split('.')
+                            if "s3" in parts:
+                                bucket_name = parts[0]
+                                key = parsed.path.lstrip('/')
+                                s3_uri = f"s3://{bucket_name}/{key}"
+                                print(f"DEBUG: Re-routing HTTP S3 to S3 URI for indexing: {s3_uri}")
+                                local_url = self._download_from_s3(s3_uri)
+                                # Skip natural HTTP download
+                                url = "s3_redirected" 
+
+                    if url.startswith("http"):
+                        import requests
+                        from urllib.parse import urlparse
+                        
+                        parsed = urlparse(url)
+                        filename = os.path.basename(parsed.path) or "downloaded_file"
+                        temp_dir = "./data/temp_downloads"
+                        os.makedirs(temp_dir, exist_ok=True)
+                        local_url = os.path.join(temp_dir, filename)
+                        
+                        print(f"Downloading HTTP URL: {url} -> {local_url}")
+                        r = requests.get(url, stream=True, timeout=30)
+                        r.raise_for_status()
+                        with open(local_url, 'wb') as f:
+                            for chunk in r.iter_content(chunk_size=8192):
+                                f.write(chunk)
                 else:
                     local_url = url # Local file
                     if not os.path.exists(local_url):
@@ -188,8 +206,10 @@ class CharacterManager:
         if not image_urls:
             return
         
+        print(f"DEBUG: [CharacterManager] Starting visual trait extraction for '{name}' with {len(image_urls)} images.")
+        
         # Prefer direct vision model (Gemini 1.5 Flash is efficient here)
-        llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0)
+        llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0)
         
         traits_prompt = f"""
         Analiza estas imágenes de referencia del personaje '{name}'.
@@ -206,40 +226,63 @@ class CharacterManager:
         """
         
         # For now, let's assume we can get one image to analyze
-        # A more robust version would batch/summarize multiples
         image_url = image_urls[0]
         
+        # Detect extension for MIME type (handling pre-signed URLs with query params)
+        base_path = image_url.split('?')[0]
+        ext = os.path.splitext(base_path)[1].lower()
+        mime_type = "image/jpeg" if ext in ['.jpg', '.jpeg', '.jfif'] else "image/png"
+        
         try:
-            # Download image data if it's an S3 url
-            km = KnowledgeManager(self.project_id)
+            # Download image data
             if image_url.startswith("s3://"):
+                km = KnowledgeManager(self.project_id)
                 local_path = km._download_from_s3(image_url)
                 with open(local_path, "rb") as f:
                     img_data = base64.b64encode(f.read()).decode("utf-8")
             else:
                 import requests
-                img_data = base64.b64encode(requests.get(image_url).content).decode("utf-8")
+                print(f"DEBUG: Downloading image from URL: {image_url[:80]}...")
+                r = requests.get(image_url, timeout=30)
+                r.raise_for_status()
+                img_data = base64.b64encode(r.content).decode("utf-8")
+
+            print(f"DEBUG: Image downloaded for {name}. Size: {len(img_data)} bytes. Detected MIME: {mime_type}")
 
             message = HumanMessage(
                 content=[
                     {"type": "text", "text": traits_prompt},
                     {
                         "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{img_data}"},
+                        "image_url": {"url": f"data:{mime_type};base64,{img_data}"},
                     },
                 ]
             )
             
+            print(f"DEBUG: Invoking Gemini Vision for {name}...")
             response = llm.invoke([message])
             content = response.content.strip()
+            print(f"DEBUG: Raw AI Response for {name}: {content}")
+            
+            # Robust JSON Extract
             if "```json" in content:
                 content = content.split("```json")[1].split("```")[0].strip()
+            elif "```" in content:
+                content = content.split("```")[1].strip()
+            
+            if "{" in content:
+                start = content.find("{")
+                end = content.rfind("}") + 1
+                content = content[start:end]
             
             data = json.loads(content)
-            self.canon.update_character(name, {"visual_traits": data.get("traits", [])})
-            print(f"Enhanced traits for {name}: {data.get('traits')}")
+            traits = data.get("traits", [])
+            self.canon.update_character(name, {"visual_traits": traits})
+            print(f"SUCCESS: Enhanced traits for {name}: {traits}")
         except Exception as e:
-            print(f"Error extracting vision traits for {name}: {e}")
+            print(f"ERROR extracting vision traits for {name}: {e}")
+            import traceback
+            traceback.print_exc()
 
     def register_character(self, name: str, description: str, reference_images: list):
         char_info = {
@@ -251,6 +294,12 @@ class CharacterManager:
         # Automatic trait extraction if images present
         if reference_images:
             self.extract_visual_traits(name, reference_images)
+
+    def get_character_images(self, name: str) -> List[str]:
+        char = self.canon.data["characters"].get(name)
+        if char:
+            return char.get("ref_images", [])
+        return []
 
     def get_character_prompt_segment(self, name: str):
         char = self.canon.data["characters"].get(name)

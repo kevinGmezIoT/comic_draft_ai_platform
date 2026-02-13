@@ -28,6 +28,7 @@ dependencies = [
     "bedrock-agentcore>=1.2.1",
     "bedrock-agentcore-starter-toolkit>=0.2.10",
     "aws-opentelemetry-distro>=0.15.0",
+    "langsmith>=0.6.9",
 ]
 
 [tool.uv]
