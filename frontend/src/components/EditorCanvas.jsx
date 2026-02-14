@@ -2,37 +2,67 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Stage, Layer, Rect, Image, Text, Group, Transformer } from 'react-konva';
 import useImage from 'use-image';
 
-const Balloon = ({ text, x, y, type, character, panelWidth }) => {
-  const isNarration = type === "narration";
-  const width = Math.min(180, panelWidth * 0.8);
+const Balloon = ({ balloon, index, x, y, width, height, fontSize, panelWidth, panelHeight, isSelected, onSelect, onChange, onDelete }) => {
+  const isNarration = balloon.type === "narration";
+  const groupRef = useRef();
+  const textRef = useRef();
+
+  // Use stored dimensions or defaults
+  const bWidth = width || Math.min(180, panelWidth * 0.8);
+  const bHeight = height || 70;
+  const bFontSize = fontSize || 13;
 
   return (
-    <Group x={x} y={y}>
+    <Group
+      ref={groupRef}
+      x={x}
+      y={y}
+      draggable
+      onClick={(e) => { e.cancelBubble = true; onSelect(); }}
+      onTap={(e) => { e.cancelBubble = true; onSelect(); }}
+      onDragStart={(e) => { e.cancelBubble = true; }}
+      onDragMove={(e) => { e.cancelBubble = true; }}
+      onDragEnd={(e) => {
+        e.cancelBubble = true;
+        onChange({
+          ...balloon,
+          x: e.target.x(),
+          y: e.target.y(),
+          width: bWidth,
+          height: bHeight,
+          fontSize: bFontSize
+        });
+      }}
+    >
       <Rect
-        width={width}
-        height={70}
+        width={bWidth}
+        height={bHeight}
         fill={isNarration ? "#fef3c7" : "white"}
         cornerRadius={isNarration ? 0 : 20}
-        stroke="#000"
-        strokeWidth={1.5}
+        stroke={isSelected ? "#8b5cf6" : "#000"}
+        strokeWidth={isSelected ? 2.5 : 1.5}
         shadowColor="black"
         shadowBlur={4}
         shadowOpacity={0.3}
       />
       <Text
-        text={text}
-        width={width - 20}
+        ref={textRef}
+        text={balloon.text}
+        width={bWidth - 20}
         x={10}
-        y={15}
-        fontSize={13}
+        y={12}
+        fontSize={bFontSize}
         fontFamily="sans-serif"
         fill="black"
         align="center"
         fontStyle="bold"
+        wrap="word"
+        ellipsis={true}
+        height={bHeight - 24}
       />
-      {!isNarration && character && (
+      {!isNarration && balloon.character && (
         <Text
-          text={character.toUpperCase()}
+          text={balloon.character.toUpperCase()}
           x={10} y={-15}
           fontSize={11}
           fontStyle="bold"
@@ -41,24 +71,77 @@ const Balloon = ({ text, x, y, type, character, panelWidth }) => {
           strokeWidth={0.5}
         />
       )}
+      {/* Delete handle visible on selection */}
+      {isSelected && (
+        <Group
+          x={bWidth - 8}
+          y={-8}
+          onClick={(e) => { e.cancelBubble = true; onDelete(); }}
+          onTap={(e) => { e.cancelBubble = true; onDelete(); }}
+        >
+          <Rect width={18} height={18} fill="#ef4444" cornerRadius={9} />
+          <Text text="×" x={3} y={0} fontSize={14} fill="white" fontStyle="bold" />
+        </Group>
+      )}
+      {/* Resize handle visible on selection */}
+      {isSelected && (
+        <Rect
+          x={bWidth - 10}
+          y={bHeight - 10}
+          width={10}
+          height={10}
+          fill="#8b5cf6"
+          cornerRadius={2}
+          draggable
+          onDragStart={(e) => { e.cancelBubble = true; }}
+          onDragMove={(e) => { e.cancelBubble = true; }}
+          onDragEnd={(e) => {
+            e.cancelBubble = true;
+            const node = e.target;
+            // node.x()/y() is the absolute position within the group, not the delta.
+            // Subtract original handle position to get the actual drag offset.
+            const deltaX = node.x() - (bWidth - 10);
+            const deltaY = node.y() - (bHeight - 10);
+            // Reset handle position back to its original spot relative to the group
+            node.x(bWidth - 10);
+            node.y(bHeight - 10);
+            const newW = Math.max(80, bWidth + deltaX);
+            const newH = Math.max(40, bHeight + deltaY);
+            onChange({
+              ...balloon,
+              x: groupRef.current.x(),
+              y: groupRef.current.y(),
+              width: newW,
+              height: newH,
+              fontSize: bFontSize
+            });
+          }}
+        />
+      )}
     </Group>
   );
 };
 
+const BalloonDefaults = {
+  getPosition: (hint, idx, panelWidth, panelHeight) => {
+    switch (hint) {
+      case "top-left": return { x: 15, y: 15 + (idx * 80) };
+      case "top-right": return { x: panelWidth - 195, y: 15 + (idx * 80) };
+      case "top-center": return { x: (panelWidth / 2) - 90, y: 15 + (idx * 80) };
+      case "bottom-center": return { x: (panelWidth / 2) - 90, y: panelHeight - 85 - (idx * 80) };
+      case "bottom-left": return { x: 15, y: panelHeight - 85 - (idx * 80) };
+      case "bottom-right": return { x: panelWidth - 195, y: panelHeight - 85 - (idx * 80) };
+      default: return { x: 40, y: 40 + (idx * 80) };
+    }
+  }
+};
+
 const PanelImage = ({
-  panel, x, y, width, height, isSelected, onSelect, onLayoutChange
+  panel, x, y, width, height, isSelected, onSelect, onLayoutChange,
+  selectedBalloonKey, onSelectBalloon, onBalloonChange, onDeleteBalloon, onSelectPanel
 }) => {
   const [image] = useImage(panel.image_url);
   const shapeRef = useRef();
-
-  const getBalloonPos = (hint, idx) => {
-    switch (hint) {
-      case "top-left": return { x: 15, y: 15 + (idx * 80) };
-      case "top-right": return { x: width - 195, y: 15 + (idx * 80) };
-      case "bottom-center": return { x: (width / 2) - 90, y: height - 85 - (idx * 80) };
-      default: return { x: 40, y: 40 + (idx * 80) };
-    }
-  };
 
   return (
     <Group
@@ -128,7 +211,7 @@ const PanelImage = ({
           />
         </Group>
       )}
-      {/* Selection highlight (Transformer already shows a box, but this adds a glow) */}
+      {/* Selection highlight */}
       <Rect
         width={width}
         height={height}
@@ -137,19 +220,45 @@ const PanelImage = ({
         cornerRadius={8}
         listening={false}
       />
+      {/* Balloons */}
       {panel.balloons && panel.balloons.map((b, i) => {
-        const pos = getBalloonPos(b.position_hint, i);
-        return <Balloon key={i} {...b} x={pos.x} y={pos.y} panelWidth={width} />;
+        // Use stored position or calculate from hint
+        const hasStoredPos = b.x !== undefined && b.y !== undefined;
+        const pos = hasStoredPos
+          ? { x: b.x, y: b.y }
+          : BalloonDefaults.getPosition(b.position_hint, i, width, height);
+
+        const balloonKey = `${panel.id}-${i}`;
+
+        return (
+          <Balloon
+            key={i}
+            balloon={b}
+            index={i}
+            x={pos.x}
+            y={pos.y}
+            width={b.width}
+            height={b.height}
+            fontSize={b.fontSize}
+            panelWidth={width}
+            panelHeight={height}
+            isSelected={selectedBalloonKey === balloonKey}
+            onSelect={() => { onSelectPanel(); onSelectBalloon(balloonKey); }}
+            onChange={(updated) => onBalloonChange(panel.id, i, updated)}
+            onDelete={() => onDeleteBalloon(panel.id, i)}
+          />
+        );
       })}
     </Group>
   );
 };
 
-const EditorCanvas = ({ panels, onSelectPanel, selectedId, onUpdateLayout, currentPage, dimensions, onDeletePanel }) => {
+const EditorCanvas = ({ panels, onSelectPanel, selectedId, onUpdateLayout, currentPage, dimensions, onDeletePanel, onBalloonChange, onDeleteBalloon }) => {
   const CANVAS_WIDTH = dimensions?.w || 800;
   const PAGE_HEIGHT = dimensions?.h || 1100;
   const transformerRef = useRef();
   const stageRef = useRef();
+  const [selectedBalloonKey, setSelectedBalloonKey] = useState(null);
 
   // Filter panels to only show the ones for the current page
   const pagePanels = panels.filter(p => p.page_number === currentPage);
@@ -157,15 +266,22 @@ const EditorCanvas = ({ panels, onSelectPanel, selectedId, onUpdateLayout, curre
   useEffect(() => {
     const handleKeyDown = (e) => {
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedId) {
-        // Only delete if the user is not typing in a textarea/input
         if (['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+
+        // If a balloon is selected, delete it instead of the panel
+        if (selectedBalloonKey) {
+          const [panelId, bIdx] = selectedBalloonKey.split('-');
+          onDeleteBalloon(parseInt(panelId) || panelId, parseInt(bIdx));
+          setSelectedBalloonKey(null);
+          return;
+        }
         onDeletePanel(selectedId);
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedId, onDeletePanel]);
+  }, [selectedId, selectedBalloonKey, onDeletePanel, onDeleteBalloon]);
 
   useEffect(() => {
     if (selectedId && transformerRef.current) {
@@ -175,14 +291,12 @@ const EditorCanvas = ({ panels, onSelectPanel, selectedId, onUpdateLayout, curre
         transformerRef.current.getLayer().batchDraw();
       }
     }
-  }, [selectedId, currentPage]); // Re-bind on page change
+  }, [selectedId, currentPage]);
 
   const handleLayoutChange = (panel, newLayoutPx) => {
-    // Safety check for dimensions
     const px_w = newLayoutPx.w_px || (panel.layout?.w / 100 * (CANVAS_WIDTH - 40)) || 370;
     const px_h = newLayoutPx.h_px || (panel.layout?.h / 100 * (PAGE_HEIGHT - 40)) || 370;
 
-    // Convert pixels back to relative percentages for persistence
     const newLayout = {
       ...panel.layout,
       x: ((newLayoutPx.x_px - 20) / (CANVAS_WIDTH - 40)) * 100,
@@ -203,7 +317,10 @@ const EditorCanvas = ({ panels, onSelectPanel, selectedId, onUpdateLayout, curre
           ref={stageRef}
           onMouseDown={(e) => {
             const clickedOnEmpty = e.target === e.target.getStage();
-            if (clickedOnEmpty) onSelectPanel(null);
+            if (clickedOnEmpty) {
+              onSelectPanel(null);
+              setSelectedBalloonKey(null);
+            }
           }}
         >
           <Layer>
@@ -221,8 +338,13 @@ const EditorCanvas = ({ panels, onSelectPanel, selectedId, onUpdateLayout, curre
                   x={x} y={y}
                   width={width} height={height}
                   isSelected={selectedId === panel.id}
-                  onSelect={() => onSelectPanel(panel)}
+                  onSelect={() => { onSelectPanel(panel); setSelectedBalloonKey(null); }}
                   onLayoutChange={(newLayoutPx) => handleLayoutChange(panel, newLayoutPx)}
+                  selectedBalloonKey={selectedBalloonKey}
+                  onSelectBalloon={setSelectedBalloonKey}
+                  onBalloonChange={onBalloonChange}
+                  onDeleteBalloon={onDeleteBalloon}
+                  onSelectPanel={() => onSelectPanel(panel)}
                 />
               );
             })}

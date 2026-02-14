@@ -56,6 +56,12 @@ def process_agent_result(project_id, data):
                 print(f"DEBUG: [PROCESSOR] Matched Panel ID {panel.id} (Page {panel.page.page_number})")
             
             if not panel:
+                # ONLY create new panels during a full generation or if explicitly missing.
+                # During 'regenerate_panel', we should NOT be re-creating panels by order fallback.
+                if action == 'regenerate_panel':
+                    print(f"WARNING: [PROCESSOR] Panel not found by ID and skipping fallback creation for action={action}")
+                    continue
+
                 # Fallback to page/order matching
                 order_val = int(p_data.get('order_in_page', 0))
                 panel, created = Panel.objects.update_or_create(
@@ -75,13 +81,47 @@ def process_agent_result(project_id, data):
                     print(f"DEBUG: [PROCESSOR] Updated existing Panel by Page/Order at Page {p_num}, Order {order_val}")
             else:
                 # Update found panel
+                
+                # CRITICAL: For specialized actions (like regenerate_panel), ONLY update if it's the target.
+                # Otherwise, the agent context might overwrite valid user modifications on other panels.
+                is_target = True
+                if action == 'regenerate_panel':
+                    is_target = str(panel.id) == str(data.get('panel_id'))
+                elif action == 'regenerate_merge':
+                    is_target = False # Merges shouldn't touch panels
+                
+                if not is_target:
+                    print(f"DEBUG: [PROCESSOR] Skipping property update for non-target Panel {panel.id} during {action}")
+                    processed_panel_ids.append(panel.id)
+                    continue
+
                 # PRESERVE existing prompt if the new one is empty or the placeholder
                 new_prompt = p_data.get('prompt')
                 if new_prompt and "placeholder" not in new_prompt.lower():
                     panel.prompt = new_prompt
                 
                 panel.scene_description = p_data.get('scene_description', panel.scene_description)
-                panel.balloons = p_data.get('balloons', [])
+                
+                # ENHANCED BALLOON MERGE: Match by content to preserve interactive props
+                new_balloons_list = p_data.get('balloons')
+                if new_balloons_list is not None:
+                    existing_balloons = panel.balloons or []
+                    eb_map = {}
+                    for eb in existing_balloons:
+                        key = f"{eb.get('character', '')}:{eb.get('text', '')[:30]}".lower().strip()
+                        eb_map[key] = eb
+
+                    merged = []
+                    for nb in new_balloons_list:
+                        nb_key = f"{nb.get('character', '')}:{nb.get('text', '')[:30]}".lower().strip()
+                        if nb_key in eb_map:
+                            eb = eb_map[nb_key]
+                            for prop in ('x', 'y', 'width', 'height', 'fontSize'):
+                                if prop in eb and prop not in nb:
+                                    nb[prop] = eb[prop]
+                        merged.append(nb)
+                    panel.balloons = merged
+                
                 panel.layout = p_data.get('layout', panel.layout)
                 panel.status = "completed"
                 panel.order = p_data.get('order_in_page', panel.order)
@@ -145,6 +185,9 @@ def process_agent_result(project_id, data):
 
         project.status = 'completed'
         project.last_error = None
+        # Persist world model summary for successive merges/regenerations
+        if result.get('world_model_summary'):
+            project.world_model_summary = result['world_model_summary']
         project.save()
         
         final_pages = project.pages.count()

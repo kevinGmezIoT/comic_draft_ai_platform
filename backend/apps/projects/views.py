@@ -478,6 +478,17 @@ class RegeneratePanelView(APIView):
             instructions = request.data.get('instructions', '')
             use_current_as_base = request.data.get('use_current_as_base', False)
             
+            # Persist incoming edits (prompt, description, balloons with interactive props) before regenerating
+            if 'prompt' in request.data:
+                panel.prompt = request.data['prompt']
+            if 'scene_description' in request.data:
+                panel.scene_description = request.data['scene_description']
+            if 'balloons' in request.data:
+                panel.balloons = request.data['balloons']
+            if 'panel_style' in request.data:
+                panel.panel_style = request.data['panel_style']
+            panel.save()
+            
             payload = {
                 "action": "regenerate_panel",
                 "project_id": str(project.id),
@@ -485,7 +496,7 @@ class RegeneratePanelView(APIView):
                 "prompt": panel.prompt,
                 "scene_description": panel.scene_description,
                 "balloons": panel.balloons,
-                "panel_style": request.data.get('panel_style', panel.panel_style),
+                "panel_style": panel.panel_style or '',
                 "instructions": instructions,
                 "current_image_url": request.build_absolute_uri(panel.image.url) if panel.image and use_current_as_base else None,
                 "reference_image_url": request.build_absolute_uri(panel.reference_image.url) if panel.reference_image else None,
@@ -534,12 +545,14 @@ class RegenerateMergedPagesView(APIView):
         try:
             project = Project.objects.get(id=project_id)
             instructions = request.data.get('instructions', '')
+            page_number = request.data.get('page_number')
             
             agent_url = f"{settings.AGENT_SERVICE_URL}/regenerate-merge"
             payload = {
                 "action": "regenerate_merge",
                 "project_id": str(project.id),
                 "instructions": instructions,
+                "page_number": page_number,
                 "world_model_summary": project.world_model_summary,
                 "panels": [{
                     "id": p.id,

@@ -39,6 +39,7 @@ class Project(models.Model):
     layout_style = models.CharField(max_length=50, default="dynamic")
     max_pages = models.IntegerField(default=3)
     max_panels = models.IntegerField(blank=True, null=True)
+    world_model_summary = models.TextField(blank=True, null=True, help_text="Resumen generado por el Agente sobre las reglas del mundo")
 
     def __str__(self):
         return self.name

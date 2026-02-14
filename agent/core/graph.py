@@ -628,13 +628,19 @@ def page_merger(state: AgentState):
     renderer = PageRenderer()
     
     pages = {}
+    target_page = state.get("page_number")
+    
     for p in state["panels"]:
         p_num = p["page_number"]
+        if target_page and int(p_num) != int(target_page):
+            continue
         if p_num not in pages: pages[p_num] = []
         pages[p_num].append(p)
         
-    merged_results = []
-    
+    merged_results = state.get("merged_pages", [])
+    # Filter out the page being regenerated to avoid duplicates
+    if target_page:
+        merged_results = [m for m in merged_results if int(m["page_number"]) != int(target_page)]
         
     last_page_s3_key = None
     sorted_page_nums = sorted(pages.keys(), key=int)
@@ -692,7 +698,10 @@ def page_merger(state: AgentState):
         visual_blend_description = get_visual_blend_description(composite_b64, vision_prompt)
         print(f"Visual Blend Insight: {visual_blend_description[:100]}...")
 
-        merge_prompt = f"ORGANIC COMIC PAGE MERGE. \nInstrucciones visuales: {visual_blend_description} \nPágina en el guión: {page_num}\nStyle: {state.get('world_model_summary', '')}. Professional comic art style."
+        user_instr = state.get('instructions', '')
+        instr_part = f"\nUSER INSTRUCTIONS: {user_instr}" if user_instr else ""
+
+        merge_prompt = f"ORGANIC COMIC PAGE MERGE. \nInstrucciones visuales: {visual_blend_description} {instr_part} \nPágina en el guión: {page_num}\nStyle: {state.get('world_model_summary', '')}. Professional comic art style."
         
         # CONTINUIDAD: Agregar la página anterior como referencia visual si existe
         merge_context_images = []
@@ -703,15 +712,12 @@ def page_merger(state: AgentState):
             print(f"DEBUG: Adding previous page (Pág {int(page_num)-1}) as continuity context: {prev_s3_uri}")
             merge_context_images.append(prev_s3_uri)
         
-        # También pasar opcionalmente el composite actual como contexto (como pide el usuario)
-        # s3:// temporary local paths don't work in context_images unless uploaded, 
-        # but the adapter can handle local paths too.
-        merge_context_images.append(composite_path)
-
         try:
             # 2. Generar mezcla orgánica via Image-to-Image (especializado para fusión)
+            print(f"DEBUG: [PageMerger] Sending Page {page_num} to provider for organic blend...")
             raw_merged_s3_key = adapter.generate_page_merge(
-                merge_prompt, 
+                merge_prompt,
+                style_prompt=state.get('style_guide', ''),
                 init_image_path=composite_path, 
                 context_images=merge_context_images
             ) 
@@ -719,26 +725,16 @@ def page_merger(state: AgentState):
             # Guardamos esta página para que sea referencia de la siguiente
             last_page_s3_key = raw_merged_s3_key
             
-            # Suponiendo que el adapter devuelve una clave de S3 (como 'generated/...'), 
-            # necesitamos descargarla para el overlay.
-            import boto3
-            s3 = boto3.client("s3")
-            bucket = os.getenv("AWS_STORAGE_BUCKET_NAME")
+            # El usuario indica que el modelo multimodal ya integra los globos, 
+            # por lo que no es necesario el paso de 'apply_final_overlays' que los redibujaba.
+            # Usamos directamente el resultado de la fusión.
             
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp_raw:
-                tmp_raw_path = tmp_raw.name
-                tmp_raw.close() # EVITA WINERROR 32
-                s3.download_file(bucket, raw_merged_s3_key, tmp_raw_path)
-                
-            final_composite_local_path = renderer.apply_final_overlays(tmp_raw_path, panel_list)
+            merged_results.append({"page_number": page_num, "image_url": raw_merged_s3_key})
+            print(f"DEBUG: [PageMerger] Page {page_num} merge completed. Result S3 Key: {raw_merged_s3_key}")
             
-            # 4. Subir el resultado FINAL (con globos nítidos) a S3
-            with open(final_composite_local_path, "rb") as f:
-                final_data = f.read()
-                final_s3_key = adapter._upload_to_s3(final_data)
-            
-            merged_results.append({"page_number": page_num, "image_url": final_s3_key})
-            print(f"Final organic page with sharp balloons uploaded to: {final_s3_key}")
+        except Exception as e:
+            print(f"ERROR: [PageMerger] Failed to merge Page {page_num}: {e}")
+            raise e
             
         finally:
             # Limpieza segura

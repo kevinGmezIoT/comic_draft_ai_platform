@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import EditorCanvas from './components/EditorCanvas';
 import ProjectWizard from './components/ProjectWizard';
 import ProjectDashboard from './components/ProjectDashboard';
@@ -52,6 +52,8 @@ function App() {
     const isGeneratingRef = React.useRef(false);
     const pollingInterval = React.useRef(null);
     const [pollingRetryCount, setPollingRetryCount] = useState(0);
+    const panelsRef = useRef(panels);
+    React.useEffect(() => { panelsRef.current = panels; }, [panels]);
 
     const fetchProjects = async () => {
         try {
@@ -107,24 +109,55 @@ function App() {
         }
     }, [projectId, view]);
 
+    // Ref to track whether we are initializing editingBalloons from panel selection
+    const balloonSyncInit = useRef(false);
+    const previousPanelRef = useRef(null);
+
     useEffect(() => {
         if (selectedPanel) {
+            // Auto-save the PREVIOUS panel's balloons to the backend before switching
+            const prevPanel = previousPanelRef.current;
+            if (prevPanel && prevPanel.id !== selectedPanel.id) {
+                const prevPanelData = panels.find(p => p.id === prevPanel.id);
+                if (prevPanelData) {
+                    axios.patch(`${import.meta.env.VITE_API_URL}/panels/${prevPanel.id}/update/`, {
+                        balloons: prevPanelData.balloons || []
+                    }).catch(e => console.error("Auto-save previous panel balloons failed:", e));
+                }
+            }
+            previousPanelRef.current = selectedPanel;
+
+            balloonSyncInit.current = true; // Flag to avoid writing back during init
             setEditingPrompt(selectedPanel.prompt || "");
             setEditingDescription(selectedPanel.scene_description || "");
             setEditingStyle(selectedPanel.panel_style || "");
             setEditingInstructions("");
             setUseCurrentAsBase(false);
             setEditingBalloons(selectedPanel.balloons || []);
+            // Reset flag after the state update cycle
+            setTimeout(() => { balloonSyncInit.current = false; }, 0);
         }
-    }, [selectedPanel]);
+    }, [selectedPanel?.id]);
+
+    // Live-sync editingBalloons changes back to the panels state for real-time canvas updates
+    useEffect(() => {
+        if (!selectedPanel || balloonSyncInit.current) return;
+        setPanels(prev => prev.map(p =>
+            p.id === selectedPanel.id ? { ...p, balloons: editingBalloons } : p
+        ));
+    }, [editingBalloons]);
 
     const handleGenerate = async (settings = {}) => {
         setLoading(true);
         isGeneratingRef.current = true;
         setError(null);
 
+        // Use the ref to guarantee we have the absolute latest panels state,
+        // not a potentially stale closure capture.
+        const latestPanels = panelsRef.current;
+
         // Map existing panels for the agent payload
-        const existingPanels = panels.map(p => ({
+        const existingPanels = latestPanels.map(p => ({
             id: p.id,
             page_number: p.page_number,
             order_in_page: p.order,
@@ -133,6 +166,17 @@ function App() {
             scene_description: p.scene_description,
             balloons: p.balloons || []
         }));
+
+        // Persist all current panel states to avoid data loss from polling
+        // (especially important for balloon positions)
+        try {
+            await Promise.all(latestPanels.map(p =>
+                axios.patch(`${import.meta.env.VITE_API_URL}/panels/${p.id}/update/`, {
+                    balloons: p.balloons || [],
+                    layout: p.layout
+                })
+            ));
+        } catch (e) { console.error("Sync before generate failed:", e); }
 
         // Siempre intentamos sincronizar los paneles existentes si los hay, 
         // para que el agente reconozca IDs de paneles ya creados y mantenga sus layouts.
@@ -214,6 +258,7 @@ function App() {
             if (response.data && response.data.status === 'completed') {
                 await fetchProjectData();
                 setLoading(false);
+                isGeneratingRef.current = false;
                 return;
             }
 
@@ -233,6 +278,37 @@ function App() {
             setSelectedPanel(null);
         } catch (error) {
             console.error("Error deleting panel:", error);
+        }
+    };
+
+    const handleBalloonChange = (panelId, balloonIdx, updatedBalloon) => {
+        isUpdatingLayout.current = true;
+        setPanels(prev => prev.map(p => {
+            if (p.id !== panelId) return p;
+            const newBalloons = [...(p.balloons || [])];
+            newBalloons[balloonIdx] = updatedBalloon;
+            return { ...p, balloons: newBalloons };
+        }));
+        // Also update editingBalloons if this panel is selected
+        if (selectedPanel?.id === panelId) {
+            setEditingBalloons(prev => {
+                const nb = [...prev];
+                nb[balloonIdx] = updatedBalloon;
+                return nb;
+            });
+        }
+        // Release polling lock after 1.5s to let backend stabilize
+        setTimeout(() => { isUpdatingLayout.current = false; }, 1500);
+    };
+
+    const handleDeleteBalloon = (panelId, balloonIdx) => {
+        setPanels(prev => prev.map(p => {
+            if (p.id !== panelId) return p;
+            const newBalloons = (p.balloons || []).filter((_, i) => i !== balloonIdx);
+            return { ...p, balloons: newBalloons };
+        }));
+        if (selectedPanel?.id === panelId) {
+            setEditingBalloons(prev => prev.filter((_, i) => i !== balloonIdx));
         }
     };
 
@@ -578,6 +654,8 @@ function App() {
                             currentPage={currentPage}
                             dimensions={getCanvasDimensions()}
                             onDeletePanel={handleDeletePanel}
+                            onBalloonChange={handleBalloonChange}
+                            onDeleteBalloon={handleDeleteBalloon}
                         />
                     ) : (
                         <div className="flex flex-col items-center justify-center p-20 bg-gray-900/50 rounded-3xl border-2 border-dashed border-gray-800 w-full max-w-2xl min-h-[600px] animate-in fade-in zoom-in duration-500">
@@ -597,54 +675,128 @@ function App() {
                     )
                 ) : (
                     <div className="flex flex-col gap-8 items-center w-full max-w-4xl">
-                        {/* Formulario de Instrucciones Image-to-Image */}
-                        <div className="w-full bg-gray-900 rounded-2xl p-6 border border-purple-500/30 shadow-2xl space-y-4">
-                            <h3 className="text-sm font-black text-purple-400 uppercase tracking-tighter flex items-center gap-2">
-                                <Wand2 size={16} />
-                                Instrucciones de Fusión Orgánica (Image-to-Image)
-                            </h3>
-                            <textarea
-                                className="w-full bg-gray-950 border border-gray-800 rounded-xl p-4 text-sm text-gray-300 h-24 resize-none outline-none focus:border-purple-500 transition-all shadow-inner"
-                                placeholder="Ej: Haz que los fondos se mezclen con un estilo de acuarela cyber-noir, suaviza las transiciones entre paneles..."
-                                value={mergeInstructions}
-                                onChange={(e) => setMergeInstructions(e.target.value)}
-                            />
-                            <button
-                                onClick={async () => {
-                                    setRegenerating(true);
-                                    try {
-                                        await axios.post(`${import.meta.env.VITE_API_URL}/projects/${projectId}/regenerate-merge/`, {
-                                            instructions: mergeInstructions
-                                        });
-                                        startPollingStatus();
-                                    } catch (e) {
-                                        console.error(e);
-                                        setRegenerating(false);
-                                    }
-                                }}
-                                disabled={regenerating}
-                                className="w-full flex items-center justify-center gap-3 bg-purple-600 hover:bg-purple-500 disabled:bg-gray-800 text-white font-black py-3 rounded-xl transition-all shadow-lg active:scale-95"
-                            >
-                                {regenerating ? <Loader2 className="animate-spin" /> : <RefreshCw size={18} />}
-                                {regenerating ? "Procesando Fusión..." : "Regenerar Fusión Orgánica"}
-                            </button>
+                        {/* Panel de Acciones Globales */}
+                        <div className="w-full flex flex-col md:flex-row gap-4 mb-2">
+                            <div className="flex-1 bg-gray-900 rounded-2xl p-6 border border-purple-500/30 shadow-2xl space-y-4">
+                                <h3 className="text-sm font-black text-purple-400 uppercase tracking-tighter flex items-center gap-2">
+                                    <Wand2 size={16} />
+                                    Fusión Global (Todas las páginas)
+                                </h3>
+                                <textarea
+                                    className="w-full bg-gray-950 border border-gray-800 rounded-xl p-4 text-sm text-gray-300 h-20 resize-none outline-none focus:border-purple-500 transition-all shadow-inner"
+                                    placeholder="Instrucciones para TODAS las páginas (ej: estilo acuarela)..."
+                                    value={mergeInstructions}
+                                    onChange={(e) => setMergeInstructions(e.target.value)}
+                                />
+                                <div className="flex gap-3">
+                                    <button
+                                        onClick={async () => {
+                                            setRegenerating(true);
+                                            try {
+                                                await axios.post(`${import.meta.env.VITE_API_URL}/projects/${projectId}/regenerate-merge/`, {
+                                                    instructions: mergeInstructions
+                                                });
+                                                startPollingStatus();
+                                            } catch (e) {
+                                                console.error(e);
+                                                setRegenerating(false);
+                                            }
+                                        }}
+                                        disabled={regenerating}
+                                        className="flex-1 flex items-center justify-center gap-3 bg-purple-600 hover:bg-purple-500 disabled:bg-gray-800 text-white font-black py-3 rounded-xl transition-all shadow-lg active:scale-95"
+                                    >
+                                        {regenerating ? <Loader2 className="animate-spin" /> : <RefreshCw size={18} />}
+                                        {regenerating ? "Procesando..." : "Regenerar Todo con Prompt"}
+                                    </button>
+                                    <button
+                                        onClick={async () => {
+                                            setRegenerating(true);
+                                            try {
+                                                await axios.post(`${import.meta.env.VITE_API_URL}/projects/${projectId}/regenerate-merge/`, {
+                                                    instructions: "" // Sincronización pura
+                                                });
+                                                startPollingStatus();
+                                            } catch (e) {
+                                                console.error(e);
+                                                setRegenerating(false);
+                                            }
+                                        }}
+                                        disabled={regenerating}
+                                        className="flex-1 flex items-center justify-center gap-3 bg-gray-800 hover:bg-gray-700 disabled:bg-gray-900 text-gray-300 font-bold py-3 rounded-xl transition-all border border-gray-700 active:scale-95"
+                                    >
+                                        <Zap size={18} className="text-yellow-500" />
+                                        Sincronizar desde Storyline
+                                    </button>
+                                </div>
+                            </div>
                         </div>
 
-                        {pages.map(page => (
-                            <div key={page.page_number} className="w-full bg-gray-900 rounded-2xl p-4 border border-gray-800 shadow-2xl">
-                                <h3 className="text-xs font-black text-gray-500 uppercase mb-4 px-2 tracking-tighter">Página {page.page_number} - Arte Fusionado</h3>
-                                {page.merged_image_url ? (
-                                    <img src={page.merged_image_url} alt="Merged" className="w-full rounded-lg shadow-2xl" />
-                                ) : (
-                                    <div className="w-full aspect-[2/3] bg-gray-950 rounded-lg flex items-center justify-center border-2 border-dashed border-gray-800">
-                                        <div className="text-center">
-                                            <Loader2 className="animate-spin text-purple-500 mx-auto mb-2" />
-                                            <p className="text-sm text-gray-600">Procesando render final...</p>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-8 w-full">
+                            {pages.map(page => (
+                                <div key={page.page_number} className="flex flex-col gap-4 bg-gray-900 rounded-3xl p-5 border border-gray-800 shadow-2xl hover:border-purple-500/20 transition-all group">
+                                    <div className="flex justify-between items-center px-1">
+                                        <h3 className="text-xs font-black text-gray-500 uppercase tracking-tighter group-hover:text-purple-400 transition-colors">Página {page.page_number} - Arte Fusionado</h3>
+                                        <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                                            <button
+                                                onClick={() => {
+                                                    const link = document.createElement('a');
+                                                    link.href = page.merged_image_url;
+                                                    link.download = `page_${page.page_number}.png`;
+                                                    link.click();
+                                                }}
+                                                className="p-1.5 hover:bg-gray-800 rounded-lg text-gray-500 hover:text-white transition-colors"
+                                                title="Descargar"
+                                            >
+                                                <Download size={14} />
+                                            </button>
                                         </div>
                                     </div>
-                                )}
-                            </div>
-                        ))}
+
+                                    <div className="relative bg-gray-950 rounded-2xl overflow-hidden border border-gray-800 shadow-inner group/img">
+                                        {page.merged_image_url ? (
+                                            <img src={page.merged_image_url} alt="Merged" className="w-full h-auto block transition-transform duration-500 group-hover/img:scale-105" />
+                                        ) : (
+                                            <div className="w-full aspect-[2/3] flex flex-col items-center justify-center">
+                                                <Loader2 className="animate-spin text-purple-500 mb-2" />
+                                                <p className="text-[10px] text-gray-600 font-bold uppercase">Procesando render...</p>
+                                            </div>
+                                        )}
+
+                                        {/* Overlay para regeneración rápida por página */}
+                                        <div className="absolute inset-0 bg-gray-950/80 opacity-0 group-hover/img:opacity-100 transition-all duration-300 flex flex-col items-center justify-center p-6 text-center backdrop-blur-sm">
+                                            <p className="text-[10px] font-black text-purple-400 uppercase mb-4 tracking-widest">Ajuste Individual</p>
+                                            <textarea
+                                                className="w-full bg-gray-900 border border-gray-700 rounded-xl p-3 text-xs text-white h-24 mb-4 resize-none outline-none focus:border-purple-500"
+                                                placeholder="Instrucciones solo para esta página..."
+                                                onClick={(e) => e.stopPropagation()}
+                                                id={`instr-page-${page.page_number}`}
+                                            />
+                                            <button
+                                                onClick={async (e) => {
+                                                    e.stopPropagation();
+                                                    const instr = document.getElementById(`instr-page-${page.page_number}`).value;
+                                                    setRegenerating(true);
+                                                    try {
+                                                        await axios.post(`${import.meta.env.VITE_API_URL}/projects/${projectId}/regenerate-merge/`, {
+                                                            instructions: instr,
+                                                            page_number: page.page_number
+                                                        });
+                                                        startPollingStatus();
+                                                    } catch (err) {
+                                                        console.error(err);
+                                                        setRegenerating(false);
+                                                    }
+                                                }}
+                                                disabled={regenerating}
+                                                className="w-full bg-purple-600 hover:bg-purple-500 text-white font-bold py-2 rounded-lg text-xs transition-colors shadow-lg active:scale-95"
+                                            >
+                                                {regenerating ? "Regenerando..." : `Regenerar Página ${page.page_number}`}
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
                     </div>
                 )}
             </div>
@@ -674,23 +826,86 @@ function App() {
                             </div>
 
                             <div>
-                                <label className="text-xs font-bold text-gray-500 uppercase block mb-3 tracking-widest">Globos de Diálogo</label>
-                                <div className="space-y-3 max-h-48 overflow-auto pr-2">
+                                <div className="flex justify-between items-center mb-3">
+                                    <label className="text-xs font-bold text-gray-500 uppercase tracking-widest">Globos de Diálogo</label>
+                                    <button
+                                        onClick={() => {
+                                            setEditingBalloons(prev => [...prev, {
+                                                text: "Nuevo texto",
+                                                type: "dialogue",
+                                                character: "",
+                                                position_hint: "top-left",
+                                                fontSize: 13,
+                                                width: 180,
+                                                height: 70
+                                            }]);
+                                        }}
+                                        className="text-[10px] font-bold text-purple-400 hover:text-purple-300 bg-purple-500/10 hover:bg-purple-500/20 px-2 py-1 rounded-lg transition"
+                                    >
+                                        + Agregar
+                                    </button>
+                                </div>
+                                <div className="space-y-3 max-h-64 overflow-auto pr-2">
                                     {editingBalloons.map((balloon, idx) => (
                                         <div key={idx} className="bg-gray-950 border border-gray-800 rounded-xl p-3 space-y-2">
                                             <div className="flex justify-between items-center">
-                                                <span className="text-[10px] font-bold text-purple-400 uppercase">{balloon.character || "NARRADOR"}</span>
-                                                <span className="text-[9px] text-gray-600 bg-gray-900 px-2 py-0.5 rounded">{balloon.type}</span>
+                                                <input
+                                                    className="text-[10px] font-bold text-purple-400 uppercase bg-transparent outline-none w-20"
+                                                    value={balloon.character || ""}
+                                                    placeholder="Personaje"
+                                                    onChange={(e) => {
+                                                        const nb = [...editingBalloons];
+                                                        nb[idx] = { ...nb[idx], character: e.target.value };
+                                                        setEditingBalloons(nb);
+                                                    }}
+                                                />
+                                                <div className="flex items-center gap-1">
+                                                    <select
+                                                        className="text-[9px] text-gray-400 bg-gray-900 px-1.5 py-0.5 rounded outline-none border border-gray-800"
+                                                        value={balloon.type}
+                                                        onChange={(e) => {
+                                                            const nb = [...editingBalloons];
+                                                            nb[idx] = { ...nb[idx], type: e.target.value };
+                                                            setEditingBalloons(nb);
+                                                        }}
+                                                    >
+                                                        <option value="dialogue">Diálogo</option>
+                                                        <option value="narration">Narración</option>
+                                                        <option value="thought">Pensamiento</option>
+                                                    </select>
+                                                    <button
+                                                        onClick={() => setEditingBalloons(prev => prev.filter((_, i) => i !== idx))}
+                                                        className="text-red-500 hover:text-red-400 p-0.5 hover:bg-red-500/10 rounded transition"
+                                                        title="Eliminar globo"
+                                                    >
+                                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+                                                    </button>
+                                                </div>
                                             </div>
                                             <textarea
                                                 className="w-full bg-transparent text-xs text-gray-300 outline-none resize-none h-12"
                                                 value={balloon.text}
                                                 onChange={(e) => {
-                                                    const newBalloons = [...editingBalloons];
-                                                    newBalloons[idx] = { ...newBalloons[idx], text: e.target.value };
-                                                    setEditingBalloons(newBalloons);
+                                                    const nb = [...editingBalloons];
+                                                    nb[idx] = { ...nb[idx], text: e.target.value };
+                                                    setEditingBalloons(nb);
                                                 }}
                                             />
+                                            <div className="flex items-center gap-2">
+                                                <span className="text-[9px] text-gray-600 shrink-0">Tamaño:</span>
+                                                <input
+                                                    type="range"
+                                                    min="8" max="32" step="1"
+                                                    value={balloon.fontSize || 13}
+                                                    onChange={(e) => {
+                                                        const nb = [...editingBalloons];
+                                                        nb[idx] = { ...nb[idx], fontSize: parseInt(e.target.value) };
+                                                        setEditingBalloons(nb);
+                                                    }}
+                                                    className="flex-1 h-1 accent-purple-500"
+                                                />
+                                                <span className="text-[9px] text-gray-500 w-6 text-right">{balloon.fontSize || 13}</span>
+                                            </div>
                                         </div>
                                     ))}
                                     {editingBalloons.length === 0 && (
@@ -757,17 +972,27 @@ function App() {
                             </div>
 
                             <button
-                                onClick={() => handleGenerate({
-                                    action: 'regenerate_panel',
-                                    panel_id: selectedPanel.id,
-                                    prompt: editingPrompt,
-                                    scene_description: editingDescription,
-                                    balloons: editingBalloons,
-                                    panel_style: editingStyle,
-                                    instructions: editingInstructions,
-                                    use_current_as_base: useCurrentAsBase,
-                                    skip_agent: false
-                                })}
+                                onClick={async () => {
+                                    // Auto-save balloon and text changes before regenerating
+                                    try {
+                                        await axios.patch(`${import.meta.env.VITE_API_URL}/panels/${selectedPanel.id}/update/`, {
+                                            prompt: editingPrompt,
+                                            scene_description: editingDescription,
+                                            balloons: editingBalloons
+                                        });
+                                    } catch (e) { console.error("Auto-save before regenerate failed:", e); }
+                                    handleGenerate({
+                                        action: 'regenerate_panel',
+                                        panel_id: selectedPanel.id,
+                                        prompt: editingPrompt,
+                                        scene_description: editingDescription,
+                                        balloons: editingBalloons,
+                                        panel_style: editingStyle,
+                                        instructions: editingInstructions,
+                                        use_current_as_base: useCurrentAsBase,
+                                        skip_agent: false
+                                    });
+                                }}
                                 className="w-full flex items-center justify-center gap-2 bg-purple-600/20 hover:bg-purple-600/30 text-purple-400 text-xs font-bold py-3 rounded-xl transition border border-purple-500/30"
                             >
                                 <RefreshCw size={14} />
@@ -779,7 +1004,7 @@ function App() {
                                 onClick={async () => {
                                     setSaving(true);
                                     try {
-                                        await axios.patch(`${import.meta.env.VITE_API_URL}/panels/${selectedPanel.id}/`, {
+                                        await axios.patch(`${import.meta.env.VITE_API_URL}/panels/${selectedPanel.id}/update/`, {
                                             prompt: editingPrompt,
                                             scene_description: editingDescription,
                                             balloons: editingBalloons

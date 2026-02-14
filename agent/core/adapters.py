@@ -207,7 +207,7 @@ class GoogleGeminiAdapter(ImageModelAdapter):
             
             # 1. Agregar imágenes de contexto (personajes, escenas + imagen base para I2I)
             all_input_images = (context_images or []).copy()
-            if init_image_path:
+            if init_image_path and init_image_path not in all_input_images:
                 print(f"DEBUG: Adding init_image_path to Gemini context: {init_image_path}")
                 all_input_images.append(init_image_path)
 
@@ -316,7 +316,8 @@ class GoogleGeminiAdapter(ImageModelAdapter):
             message_content.append({"type": "text", "text": prompt})
 
             # 3. Agregar prompt de estilo
-            message_content.append({"type": "text", "text": "\nESTILO: " + style_prompt})
+            if style_prompt:
+                message_content.append({"type": "text", "text": "\nESTILO: " + style_prompt})
 
             # 4. Invoke model via LangChain for full traceability
             # IMPORTANT: response_modalities must be a list of Enums, not strings.
