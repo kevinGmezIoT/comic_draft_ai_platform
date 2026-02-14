@@ -27,5 +27,7 @@ urlpatterns = [
     path('api/projects/<uuid:project_id>/notes/', ProjectNoteView.as_view()),
     path('api/projects/notes/<uuid:note_id>/', ProjectNoteDetailView.as_view()),
     path('api/panels/<int:panel_id>/update-layout/', PanelLayoutUpdateView.as_view()),
+    path('api/panels/<int:panel_id>/update/', UpdatePanelView.as_view()),
+    path('api/panels/<int:panel_id>/regenerate/', RegeneratePanelView.as_view()),
     path('api/panels/<int:panel_id>/', DeletePanelView.as_view()),
 ]

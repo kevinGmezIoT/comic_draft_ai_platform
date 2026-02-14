@@ -5,21 +5,21 @@ from openai import OpenAI
 
 class ImageModelAdapter(ABC):
     @abstractmethod
-    def generate_image(self, prompt: str, aspect_ratio: str = "1:1", init_image_path: str = None, context_images: list = None, **kwargs) -> str:
+    def generate_image(self, prompt: str, style_prompt:str, aspect_ratio: str = "1:1", init_image_path: str = None, context_images: list = None, **kwargs) -> str:
         """Generates an image and returns the URL or S3 path. 
         init_image_path: used for image-to-image variations.
         context_images: list of URLs or S3 paths to use as multimodal context (Gemini)."""
         pass
 
-    def generate_panel(self, prompt: str, aspect_ratio: str = "1:1", context_images: list = None, **kwargs) -> str:
+    def generate_panel(self, prompt: str, style_prompt:str, aspect_ratio: str = "1:1", context_images: list = None, **kwargs) -> str:
         """Especializado para generación de viñetas individuales."""
-        return self.generate_image(prompt, aspect_ratio=aspect_ratio, context_images=context_images, **kwargs)
+        return self.generate_image(prompt, style_prompt=style_prompt, aspect_ratio=aspect_ratio, context_images=context_images, **kwargs)
 
-    def generate_page_merge(self, prompt: str, init_image_path: str = None, context_images: list = None, **kwargs) -> str:
+    def generate_page_merge(self, prompt: str, style_prompt:str, init_image_path: str = None, context_images: list = None, **kwargs) -> str:
         """Especializado para la unión orgánica de páginas."""
-        return self.generate_image(prompt, init_image_path=init_image_path, context_images=context_images, **kwargs)
+        return self.generate_image(prompt, style_prompt=style_prompt, init_image_path=init_image_path, context_images=context_images, **kwargs)
 
-    def edit_image(self, original_image_url: str, prompt: str, mask_url: str = None) -> str:
+    def edit_image(self, original_image_url: str, prompt: str, style_prompt:str, mask_url: str = None) -> str:
         """Edits an existing image (Inpainting/Outpainting/Variation)"""
         import tempfile
         import boto3
@@ -41,7 +41,7 @@ class ImageModelAdapter(ABC):
                 s3.download_fileobj(bucket, original_image_url, tmp_path)
         
             # 2. Llamar a la implementación específica de cada modelo pasando el path local
-            return self.generate_image(prompt, init_image_path=tmp_path)
+            return self.generate_image(prompt, style_prompt=style_prompt, init_image_path=tmp_path)
         finally:
             if os.path.exists(tmp_path):
                 try: os.remove(tmp_path)
@@ -173,17 +173,17 @@ class GoogleGeminiAdapter(ImageModelAdapter):
             temperature=0.2
         )
 
-    def generate_panel(self, prompt: str, aspect_ratio: str = "1:1", context_images: list = None, **kwargs) -> str:
+    def generate_panel(self, prompt: str, style_prompt: str = "", aspect_ratio: str = "1:1", context_images: list = None, **kwargs) -> str:
         """Implementación específica de Gemini con contexto de personajes."""
         enriched_prompt = prompt + "\nCharacter(s) reference in image(s) attached."
-        return self.generate_image(enriched_prompt, aspect_ratio=aspect_ratio, context_images=context_images, **kwargs)
+        return self.generate_image(enriched_prompt, style_prompt=style_prompt, aspect_ratio=aspect_ratio, context_images=context_images, **kwargs)
 
-    def generate_page_merge(self, prompt: str, init_image_path: str = None, context_images: list = None, **kwargs) -> str:
+    def generate_page_merge(self, prompt: str, style_prompt:str, init_image_path: str = None, context_images: list = None, **kwargs) -> str:
         """Implementación específica de Gemini con contexto de página anterior."""
         enriched_prompt = prompt + "\nPrevious page reference in image(s) attached."
-        return self.generate_image(enriched_prompt, init_image_path=init_image_path, context_images=context_images, **kwargs)
+        return self.generate_image(enriched_prompt, style_prompt=style_prompt, init_image_path=init_image_path, context_images=context_images, **kwargs)
 
-    def generate_image(self, prompt: str, aspect_ratio: str = "1:1", init_image_path: str = None, context_images: list = None, **kwargs) -> str:
+    def generate_image(self, prompt: str, style_prompt: str = "", aspect_ratio: str = "1:1", init_image_path: str = None, context_images: list = None, **kwargs) -> str:
         from langchain_core.messages import HumanMessage
         from langchain_google_genai import Modality
         import PIL.Image
@@ -205,10 +205,15 @@ class GoogleGeminiAdapter(ImageModelAdapter):
         try:
             message_content = []
             
-            # 1. Agregar imágenes de contexto (personajes, escenas)
-            if context_images:
-                print(f"DEBUG: Adding {len(context_images)} context images to Gemini generation...")
-                for img_url in context_images:
+            # 1. Agregar imágenes de contexto (personajes, escenas + imagen base para I2I)
+            all_input_images = (context_images or []).copy()
+            if init_image_path:
+                print(f"DEBUG: Adding init_image_path to Gemini context: {init_image_path}")
+                all_input_images.append(init_image_path)
+
+            if all_input_images:
+                print(f"DEBUG: Adding {len(all_input_images)} input images to Gemini generation...")
+                for img_url in all_input_images:
                     try:
                         img_bytes = None
                         if not img_url: continue
@@ -309,6 +314,9 @@ class GoogleGeminiAdapter(ImageModelAdapter):
 
             # 2. Agregar prompt de texto
             message_content.append({"type": "text", "text": prompt})
+
+            # 3. Agregar prompt de estilo
+            message_content.append({"type": "text", "text": "\nESTILO: " + style_prompt})
 
             # 4. Invoke model via LangChain for full traceability
             # IMPORTANT: response_modalities must be a list of Enums, not strings.

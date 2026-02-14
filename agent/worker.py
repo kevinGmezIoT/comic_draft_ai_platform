@@ -18,6 +18,25 @@ queue_url = os.getenv('AWS_SQS_QUEUE_URL')
 # Compile the LangGraph
 graph = create_comic_graph()
 
+def notify_completion(project_id, result, action):
+    """Notify backend via SQS upon task completion or failure."""
+    if not queue_url:
+        print(f"WARNING: AWS_SQS_QUEUE_URL not set. Action '{action}' results will not be sent.")
+        return
+
+    print(f"DEBUG: Notifying completion for action '{action}' on project {project_id}")
+    try:
+        message_body = json.dumps({
+            "project_id": project_id,
+            "status": "completed" if "error" not in result else "failed",
+            "action": action,
+            "result": result
+        })
+        sqs.send_message(QueueUrl=queue_url, MessageBody=message_body)
+        print("DEBUG: SQS message sent successfully.")
+    except Exception as e:
+        print(f"ERROR: Failed to send SQS message: {e}")
+
 def generate_comic_logic(project_id, sources, max_pages=3, max_panels=None, layout_style="dynamic", **kwargs):
     """
     Core logic for initial comic generation.
@@ -55,113 +74,128 @@ def generate_comic_logic(project_id, sources, max_pages=3, max_panels=None, layo
         result = graph.invoke(initial_state, config=config)
         
         # Notify backend via SQS
-        if queue_url:
-            print(f"DEBUG: Sending result to SQS Queue: {queue_url}")
-            try:
-                message_body = json.dumps({
-                    "project_id": project_id,
-                    "status": "completed",
-                    "result": result
-                })
-                sqs.send_message(QueueUrl=queue_url, MessageBody=message_body)
-                print("DEBUG: SQS message sent successfully.")
-            except Exception as e:
-                print(f"ERROR: Failed to send SQS message: {e}")
-        else:
-            print("WARNING: AWS_SQS_QUEUE_URL not set. Results will not be sent to backend.")
+        notify_completion(project_id, result, "generate")
             
         return result
     except Exception as e:
         print(f"Error in graph execution: {e}")
-        # Send failure notification if possible
-        if queue_url:
-            try:
-                sqs.send_message(QueueUrl=queue_url, MessageBody=json.dumps({
-                    "project_id": project_id,
-                    "status": "failed",
-                    "error": str(e)
-                }))
-            except: pass
+        notify_completion(project_id, {"error": str(e)}, "generate")
         return {"current_step": "error", "error": str(e)}
 
-def regenerate_panel_logic(project_id, panel_id, prompt, scene_description, balloons):
+def regenerate_panel_logic(project_id, panel_id, prompt, scene_description, balloons, **kwargs):
     """
-    Logic for single panel regeneration.
+    Logic for single panel regeneration with enhanced context.
     """
     print(f"--- REGENERATING PANEL: {panel_id} in Project {project_id} ---")
+    print(f"DEBUG: Received regeneration context: {kwargs}")
     from core.graph import image_generator
     
-    backend_url = os.getenv('BACKEND_INTERNAL_URL', 'http://localhost:8000')
-    response = requests.get(f"{backend_url}/api/projects/{project_id}/")
-    project_data = response.json()
+    # We no longer fetch from backend, we expect the context in kwargs (matched generate_comic_logic)
+    all_panels = kwargs.get('panels', [])
+    world_model_summary = kwargs.get('world_model_summary', "")
+    global_context = kwargs.get('global_context', {})
     
-    all_panels = []
-    for page in project_data.get('pages', []):
-        for p in page.get('panels', []):
-            p['order_in_page'] = p.get('order', 0)
+    # Pre-process panels to ensure format is consistent with AgentState
+    processed_panels = []
+    for p in all_panels:
+        # If it's the target panel, update with latest instructions
+        if str(p['id']) == str(panel_id):
+            p['prompt'] = prompt
+            p['scene_description'] = scene_description
+            p['balloons'] = balloons
+            p['status'] = 'editing' # Trigger regeneration
+            
+            # Context engineering overrides
+            p['panel_style'] = kwargs.get('panel_style', p.get('panel_style'))
+            p['instructions'] = kwargs.get('instructions', p.get('instructions'))
+            
+            # Use provided current_image_url or fallback to existing image_url for I2I
+            provided_url = kwargs.get('current_image_url')
+            p['current_image_url'] = provided_url if provided_url else p.get('image_url')
+            
+            p['reference_image_url'] = kwargs.get('reference_image_url', p.get('reference_image_url'))
+        
+        # Ensure characters field exists (mapping from character_refs if necessary)
+        if 'characters' not in p:
             p['characters'] = p.get('character_refs', [])
             
-            if p['id'] == panel_id:
-                p['prompt'] = prompt
-                p['scene_description'] = scene_description
-                p['balloons'] = balloons
-                p['status'] = 'pending' 
-            all_panels.append(p)
+        processed_panels.append(p)
 
     state = {
+        "action": "regenerate_panel",
         "project_id": project_id,
-        "world_model_summary": project_data.get('world_model_summary', ""),
-        "panels": all_panels,
-        "merged_pages": []
+        "panel_id": panel_id,
+        "world_model_summary": world_model_summary,
+        "panels": processed_panels,
+        "merged_pages": [],
+        "style_guide": global_context.get('style_guide', ""),
+        "global_context": global_context
     }
     
     try:
-        # LangSmith tracing for direct node call
+        # LangSmith tracing for direct graph call
         from langsmith import traceable
-        @traceable(name="regenerate_panel", project_name=os.getenv("LANGCHAIN_PROJECT", "comic-draft-ai"))
+        from core.graph import create_comic_graph
+        
+        @traceable(name="regenerate_panel_flow", project_name=os.getenv("LANGCHAIN_PROJECT", "comic-draft-ai"))
         def run_traced():
-            return image_generator(state)
+            app = create_comic_graph()
+            # Iniciar el grafo. El router interno llevará directamente a 'generator'
+            return app.invoke(state, config={"recursion_limit": 5})
             
         updated_state = run_traced()
+        # Notify backend via SQS
+        notify_completion(project_id, updated_state, "regenerate_panel")
         return updated_state
     except Exception as e:
+        notify_completion(project_id, {"error": str(e)}, "regenerate_panel")
         return {"error": str(e)}
 
-def regenerate_merge_logic(project_id, instructions):
+def regenerate_merge_logic(project_id, instructions, **kwargs):
     """
-    Logic for page merging.
+    Logic for page merging with provided context.
     """
     print(f"--- REGENERATING MERGE: Project {project_id} ---")
-    from core.graph import page_merger
     
-    backend_url = os.getenv('BACKEND_INTERNAL_URL', 'http://localhost:8000')
-    response = requests.get(f"{backend_url}/api/projects/{project_id}/")
-    project_data = response.json()
+    all_panels = kwargs.get('panels', [])
+    world_model_summary = kwargs.get('world_model_summary', instructions if instructions else "Professional comic book style.")
+    global_context = kwargs.get('global_context', {})
     
-    all_panels = []
-    for page in project_data.get('pages', []):
-        for p in page.get('panels', []):
-            p['order_in_page'] = p.get('order', 0)
+    # Pre-process panels
+    processed_panels = []
+    for p in all_panels:
+        if 'characters' not in p:
             p['characters'] = p.get('character_refs', [])
-            all_panels.append(p)
+        processed_panels.append(p)
         
     state = {
+        "action": "regenerate_merge", # Note: Need to add this to router if needed later
         "project_id": project_id,
-        "world_model_summary": instructions if instructions else "Professional comic book style.",
-        "panels": all_panels,
-        "merged_pages": []
+        "world_model_summary": world_model_summary,
+        "panels": processed_panels,
+        "merged_pages": [],
+        "style_guide": global_context.get('style_guide', ""),
+        "global_context": global_context
     }
     
     try:
-        # LangSmith tracing for direct node call
+        # LangSmith tracing for direct graph call
         from langsmith import traceable
-        @traceable(name="regenerate_merge", project_name=os.getenv("LANGCHAIN_PROJECT", "comic-draft-ai"))
+        from core.graph import create_comic_graph
+        
+        @traceable(name="regenerate_merge_flow", project_name=os.getenv("LANGCHAIN_PROJECT", "comic-draft-ai"))
         def run_traced():
-            return page_merger(state)
+            app = create_comic_graph()
+            # For merge, we might want to start further in the graph or just run full if not optimized
+            # But the current merger node expects the full state.
+            return app.invoke(state, config={"recursion_limit": 10})
             
         updated_state = run_traced()
+        # Notify backend via SQS
+        notify_completion(project_id, updated_state, "regenerate_merge")
         return updated_state
     except Exception as e:
+        notify_completion(project_id, {"error": str(e)}, "regenerate_merge")
         return {"error": str(e)}
 
 @app.entrypoint
@@ -176,33 +210,18 @@ def agent_invocation(payload, context):
     project_id = payload.get("project_id")
     
     if not project_id:
-        return {"status": "error", "message": "Missing project_id in payload 2"}
+        return {"status": "error", "message": "Missing project_id in payload"}
+    
+    if not action:
+        return {"status": "error", "message": "Missing action in payload"}
 
     try:
         if action == "generate":
-            result = generate_comic_logic(
-                project_id, 
-                payload.get("sources", []),
-                max_pages=payload.get("max_pages", 3),
-                max_panels=payload.get("max_panels"),
-                layout_style=payload.get("layout_style", "dynamic"),
-                plan_only=payload.get("plan_only", False),
-                panels=payload.get("panels", []),
-                global_context=payload.get("global_context", {})
-            )
+            result = generate_comic_logic(**payload)
         elif action == "regenerate_panel":
-            result = regenerate_panel_logic(
-                project_id,
-                payload.get("panel_id"),
-                payload.get("prompt"),
-                payload.get("scene_description"),
-                payload.get("balloons", [])
-            )
+            result = regenerate_panel_logic(**payload)
         elif action == "regenerate_merge":
-            result = regenerate_merge_logic(
-                project_id,
-                payload.get("instructions")
-            )
+            result = regenerate_merge_logic(**payload)
         else:
             return {"status": "error", "message": f"Unknown action: {action}"}
 

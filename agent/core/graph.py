@@ -36,6 +36,8 @@ class AgentState(TypedDict):
     canvas_dimensions: str
     plan_only: bool = False
     current_step: str
+    action: str = "generate" # "generate" | "regenerate_panel"
+    panel_id: str = None
     continuity_state: Dict[str, Dict] # State tracking for Agent H
     reference_images: List[str]
     global_context: Dict # Optional metadata from backend
@@ -47,9 +49,17 @@ class PromptBuilder:
         self.sm = StyleManager(project_id)
         
     def build_panel_prompt(self, panel: Panel, world_summary: str, continuity_state: Dict) -> str:
-        # Layer 1: Style
-        style_part = self.sm.get_style_prompt()
+        # Layer 1: Style Override or Global Style
+        panel_style = panel.get("panel_style")
+        if panel_style:
+            style_part = f"STYLE OVERRIDE: {panel_style}"
+        else:
+            style_part = self.sm.get_style_prompt()
         
+        # Layer 1.5: Instruction Integration
+        instructions = panel.get("instructions")
+        instr_part = f"ADITONAL INSTRUCTIONS: {instructions}\n" if instructions else ""
+
         # Layer 2: Characters (Canonical Traits + Continuity)
         char_parts = []
         char_names = panel.get("characters", [])
@@ -73,21 +83,46 @@ class PromptBuilder:
         if w / h > 1.2: aspect_ratio = "16:9"
         elif h / w > 1.2: aspect_ratio = "9:16"
 
-        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.3)
-        reasoning_prompt = f"""
-        Actúa como un Director de Fotografía de Cómics (Agent F: Prompt Builder).
-        ESCENA: {scene_desc}
-        ESCENARIO: {panel['scenery']}
-        PERSONAJES: {", ".join(char_names) if len(char_names) > 0 else "Sin personaje"}
-        CONTEXTO MUNDO: {world_summary[:300]}
-        ESTILO BASE: {style_part}
-        DISEÑO PANEL: {w}% de ancho x {h}% de alto ({aspect_ratio}).
-        RASGOS CANÓNICOS: {" ".join(char_parts) if len(char_parts) > 0 else "Sin personaje"}
+        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
         
-        Genera un PROMPT VISUAL FINAL para Stable Diffusion / DALL-E.
-        Mejora la composición, iluminación y ángulo de cámara para este layout.
-        Responde ÚNICAMENTE con el prompt en inglés o español según sea más efectivo para la IA de imagen.
-        """
+        is_edit = panel.get("status") == "editing"
+        old_prompt = panel.get("prompt", "")
+
+        if is_edit and instructions:
+            reasoning_prompt = f"""
+            Actúa como un Director de Arte de Cómics. Estás EDITANDO una viñeta existente.
+            
+            DESCRIPCIÓN VISUAL ANTERIOR: {old_prompt}
+            INSTRUCCIONES DE CAMBIO: {instructions}
+            
+            NUEVO ESTILO: {style_part}
+            ESCENARIO: {panel.get('scenery', 'Basado en la escena')}
+            PERSONAJES: {", ".join(char_names) if len(char_names) > 0 else "Sin personaje"}
+            CONTEXTO MUNDO: {world_summary[:300]}
+            DISEÑO: {w}%x{h}% ({aspect_ratio}).
+            RASGOS: {" ".join(char_parts)}
+            
+            Genera un PROMPT VISUAL FINAL que describa el resultado deseado combinando la descripción original con los cambios solicitados.
+            Sé específico sobre qué elementos cambian (ej: "Ahora la ventana está iluminada...") y qué elementos se mantienen.
+            Como la imagen original se adjunta, puedes hacer referencia a ella indicando qué debes cambiar.
+            Responde ÚNICAMENTE con el prompt en inglés o español.
+            """
+        else:
+            reasoning_prompt = f"""
+            Actúa como un Director de Fotografía de Cómics (Agent F: Prompt Builder).
+            ESCENA: {scene_desc}
+            ESCENARIO: {panel.get('scenery', 'Basado en la descripción de la escena')}
+            PERSONAJES: {", ".join(char_names) if len(char_names) > 0 else "Sin personaje"}
+            CONTEXTO MUNDO: {world_summary[:300]}
+            ESTILO BASE: {style_part}
+            DISEÑO PANEL: {w}% de ancho x {h}% de alto ({aspect_ratio}).
+            RASGOS CANÓNICOS: {" ".join(char_parts) if len(char_parts) > 0 else "Sin personaje"}
+            
+            Genera un PROMPT VISUAL FINAL para Stable Diffusion / DALL-E.
+            Mejora la composición, iluminación y ángulo de cámara para este layout.
+            {instr_part}
+            Responde ÚNICAMENTE con el prompt en inglés o español según sea más efectivo para la IA de imagen.
+            """
         try:
             visual_prompt = llm.invoke(reasoning_prompt).content.strip()
             return visual_prompt
@@ -414,7 +449,15 @@ def image_generator(state: AgentState):
     # Identificar personajes y sus imágenes de referencia para contexto multimodal
     cm = pb.cm # Usar el CharacterManager de PromptBuilder
     
+    target_panel_id = str(state.get("panel_id")) if state.get("panel_id") else None
+
     for panel in sorted_panels:
+        # Si es regeneración selectiva, saltar si no es el ID objetivo
+        if state.get("action") == "regenerate_panel" and target_panel_id:
+            if str(panel.get("id")) != target_panel_id:
+                updated_panels.append(panel)
+                continue
+
         if panel.get("image_url") and panel.get("status") not in ["pending", "editing"]:
             updated_panels.append(panel)
             continue
@@ -425,12 +468,17 @@ def image_generator(state: AgentState):
         # Agent F: Build Layered Prompt
         augmented_prompt = pb.build_panel_prompt(panel, state["world_model_summary"], continuity)
         
-        # Coleccionar imágenes de contexto (Personajes del panel)
+        # Coleccionar imágenes de contexto (Personajes del panel + Imagen de Referencia)
         context_images = []
         for char_name in panel.get("characters", []):
             char_refs = cm.get_character_images(char_name)
             if char_refs:
                 context_images.extend(char_refs)
+        
+        # Add reference image from Panel context if available
+        ref_img = panel.get("reference_image_url")
+        if ref_img:
+            context_images.append(ref_img)
         
         # Eliminar duplicados manteniendo orden
         seen = set()
@@ -438,6 +486,7 @@ def image_generator(state: AgentState):
         
         print(f"DEBUG: Panel {panel['id']} Context Images ({len(unique_context)}): {unique_context}")
         print(f"DEBUG: Augmented Prompt: {augmented_prompt[:150]}...")
+        print(f"DEBUG: Style Prompt: {panel.get('panel_style')}")
 
         # Image Generation
         layout = panel.get("layout", {"w": 50, "h": 50})
@@ -446,10 +495,15 @@ def image_generator(state: AgentState):
         if w / h > 1.2: aspect_ratio = "16:9"
         elif h / w > 1.2: aspect_ratio = "9:16"
 
-        if panel.get("image_url") and panel["status"] == "editing":
-            url = adapter.edit_image(panel["image_url"], augmented_prompt)
+        # Image-to-Image support if current_image_url is provided or fallback to existing image_url
+        init_image = panel.get("current_image_url") or panel.get("image_url")
+
+        if panel.get("status") == "editing" and init_image:
+            # Usamos edit_image para que el adapter gestione la descarga de la URL antes de procesar
+            print(f"DEBUG: Editing panel {panel['id']} using init_image: {init_image}")
+            url = adapter.edit_image(original_image_url=init_image, prompt=augmented_prompt, style_prompt=panel.get('panel_style'))
         else:
-            url = adapter.generate_panel(augmented_prompt, aspect_ratio=aspect_ratio, context_images=unique_context)
+            url = adapter.generate_panel(augmented_prompt, style_prompt=panel.get('panel_style'), aspect_ratio=aspect_ratio, context_images=unique_context)
             
         panel["image_url"] = url
         panel["status"] = "generated"
@@ -766,7 +820,23 @@ def create_comic_graph():
     workflow.add_node("balloons", balloon_generator)
     workflow.add_node("merger", page_merger)
 
-    workflow.set_entry_point("ingest")
+    # Router de entrada para regeneración selectiva
+    def router_entry(state: AgentState):
+        if state.get("action") == "regenerate_panel":
+            return "generator"
+        if state.get("action") == "regenerate_merge":
+            return "merger"
+        return "ingest"
+
+    workflow.set_conditional_entry_point(
+        router_entry,
+        {
+            "generator": "generator",
+            "merger": "merger",
+            "ingest": "ingest"
+        }
+    )
+
     workflow.add_edge("ingest", "world_model_builder")
     workflow.add_edge("world_model_builder", "planner")
     workflow.add_edge("planner", "layout_designer")
@@ -786,7 +856,21 @@ def create_comic_graph():
         }
     )
 
-    workflow.add_edge("generator", "balloons")
+    # Para regeneración selectiva, después del generador terminamos (o podemos seguir a globos si quisiéramos)
+    def post_generator_router(state: AgentState):
+        if state.get("action") == "regenerate_panel":
+            return "end"
+        return "continue"
+
+    workflow.add_conditional_edges(
+        "generator",
+        post_generator_router,
+        {
+            "end": END,
+            "continue": "balloons"
+        }
+    )
+
     workflow.add_edge("balloons", "merger")
     workflow.add_edge("merger", END)
 

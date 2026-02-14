@@ -41,6 +41,9 @@ function App() {
     const [projectId, setProjectId] = useState(null);
     const [editingPrompt, setEditingPrompt] = useState("");
     const [editingDescription, setEditingDescription] = useState("");
+    const [editingStyle, setEditingStyle] = useState("");
+    const [editingInstructions, setEditingInstructions] = useState("");
+    const [useCurrentAsBase, setUseCurrentAsBase] = useState(false);
     const [editingBalloons, setEditingBalloons] = useState([]);
     const [mergeInstructions, setMergeInstructions] = useState("");
     const [saving, setSaving] = useState(false);
@@ -108,6 +111,9 @@ function App() {
         if (selectedPanel) {
             setEditingPrompt(selectedPanel.prompt || "");
             setEditingDescription(selectedPanel.scene_description || "");
+            setEditingStyle(selectedPanel.panel_style || "");
+            setEditingInstructions("");
+            setUseCurrentAsBase(false);
             setEditingBalloons(selectedPanel.balloons || []);
         }
     }, [selectedPanel]);
@@ -190,7 +196,19 @@ function App() {
                 return;
             }
 
-            const response = await axios.post(`${import.meta.env.VITE_API_URL}/projects/${projectId}/generate/`, config);
+            let response;
+            if (settings.action === 'regenerate_panel') {
+                response = await axios.post(`${import.meta.env.VITE_API_URL}/panels/${settings.panel_id}/regenerate/`, {
+                    prompt: settings.prompt,
+                    scene_description: settings.scene_description,
+                    balloons: settings.balloons,
+                    panel_style: settings.panel_style,
+                    instructions: settings.instructions,
+                    use_current_as_base: settings.use_current_as_base
+                });
+            } else {
+                response = await axios.post(`${import.meta.env.VITE_API_URL}/projects/${projectId}/generate/`, config);
+            }
 
             // If the response is already completed (Sync Path), fetch data immediately
             if (response.data && response.data.status === 'completed') {
@@ -681,12 +699,79 @@ function App() {
                                 </div>
                             </div>
 
+                            <div>
+                                <label className="text-xs font-bold text-gray-500 uppercase block mb-2 tracking-widest">Estilo del Panel (Personalizado)</label>
+                                <input
+                                    type="text"
+                                    className="w-full bg-gray-950 border border-gray-800 rounded-xl p-3 text-sm text-gray-400 outline-none focus:border-purple-500 transition-all shadow-inner"
+                                    placeholder="Ej: Comic Noir, 90s Manga..."
+                                    value={editingStyle}
+                                    onChange={(e) => setEditingStyle(e.target.value)}
+                                />
+                            </div>
+
+                            <div>
+                                <label className="text-xs font-bold text-gray-500 uppercase block mb-2 tracking-widest">Instrucciones de Regeneración</label>
+                                <textarea
+                                    className="w-full bg-gray-950 border border-gray-800 rounded-xl p-3 text-sm text-gray-400 h-20 resize-none outline-none focus:border-purple-500 transition-all shadow-inner"
+                                    placeholder="Ej: Haz que llueva, cambia la ropa a rojo..."
+                                    value={editingInstructions}
+                                    onChange={(e) => setEditingInstructions(e.target.value)}
+                                />
+                                <div className="flex items-center gap-2 mt-2">
+                                    <input
+                                        type="checkbox"
+                                        id="useBase"
+                                        checked={useCurrentAsBase}
+                                        onChange={(e) => setUseCurrentAsBase(e.target.checked)}
+                                        className="accent-purple-600"
+                                    />
+                                    <label htmlFor="useBase" className="text-[10px] text-gray-500 font-bold uppercase cursor-pointer">Usar imagen actual como base (I2I)</label>
+                                </div>
+                            </div>
+
+                            <div>
+                                <label className="text-xs font-bold text-gray-500 uppercase block mb-2 tracking-widest">Imagen de Referencia</label>
+                                <div className="flex flex-col gap-2">
+                                    <input
+                                        type="file"
+                                        className="hidden"
+                                        id="refImageUpload"
+                                        onChange={async (e) => {
+                                            const file = e.target.files[0];
+                                            if (file) {
+                                                const formData = new FormData();
+                                                formData.append('image', file);
+                                                // Assuming a helper or just uploading it
+                                                alert("Función de subida de referencia: Deberías implementar la subida a S3/Backend aquí.");
+                                            }
+                                        }}
+                                    />
+                                    <button
+                                        onClick={() => document.getElementById('refImageUpload').click()}
+                                        className="w-full py-2 bg-gray-800 hover:bg-gray-700 border border-dashed border-gray-600 rounded-lg text-[10px] font-bold text-gray-400 transition"
+                                    >
+                                        {selectedPanel.reference_image ? "Cambiar Referencia" : "+ Subir Referencia"}
+                                    </button>
+                                </div>
+                            </div>
+
                             <button
-                                onClick={() => handleGenerate({ panels: [{ ...selectedPanel, prompt: editingPrompt, scene_description: editingDescription, balloons: editingBalloons, status: 'pending' }], skip_cleaning: true })}
-                                className="w-full flex items-center justify-center gap-2 bg-gray-800 hover:bg-gray-700 text-xs font-bold py-3 rounded-xl transition border border-gray-700"
+                                onClick={() => handleGenerate({
+                                    action: 'regenerate_panel',
+                                    panel_id: selectedPanel.id,
+                                    prompt: editingPrompt,
+                                    scene_description: editingDescription,
+                                    balloons: editingBalloons,
+                                    panel_style: editingStyle,
+                                    instructions: editingInstructions,
+                                    use_current_as_base: useCurrentAsBase,
+                                    skip_agent: false
+                                })}
+                                className="w-full flex items-center justify-center gap-2 bg-purple-600/20 hover:bg-purple-600/30 text-purple-400 text-xs font-bold py-3 rounded-xl transition border border-purple-500/30"
                             >
                                 <RefreshCw size={14} />
-                                Regenerar Imagen
+                                Regenerar Imagen con Contexto
                             </button>
                         </div>
                         <div className="mt-6 pt-6 border-t border-gray-800">

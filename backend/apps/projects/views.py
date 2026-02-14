@@ -457,29 +457,69 @@ class UpdatePanelView(APIView):
             panel.prompt = request.data.get('prompt', panel.prompt)
             panel.scene_description = request.data.get('scene_description', panel.scene_description)
             panel.balloons = request.data.get('balloons', panel.balloons)
+            panel.panel_style = request.data.get('panel_style', panel.panel_style)
+            
+            # Handle reference image if provided via URL or path
+            if 'reference_image_url' in request.data:
+                panel.reference_image.name = request.data.get('reference_image_url')
+            
             panel.save()
             return Response({"status": "updated", "id": panel.id}, status=status.HTTP_200_OK)
         except Panel.DoesNotExist:
             return Response({"error": "Panel not found"}, status=status.HTTP_404_NOT_FOUND)
 
 class RegeneratePanelView(APIView):
-    """Dispara la regeneración de la imagen de un panel"""
+    """Dispara la regeneración de la imagen de un panel con contexto mejorado"""
     def post(self, request, panel_id):
         try:
             panel = Panel.objects.get(id=panel_id)
             project = panel.page.project
             
-            agent_url = f"{settings.AGENT_SERVICE_URL}/regenerate-panel"
+            instructions = request.data.get('instructions', '')
+            use_current_as_base = request.data.get('use_current_as_base', False)
+            
             payload = {
+                "action": "regenerate_panel",
                 "project_id": str(project.id),
                 "panel_id": panel.id,
                 "prompt": panel.prompt,
                 "scene_description": panel.scene_description,
-                "balloons": panel.balloons
+                "balloons": panel.balloons,
+                "panel_style": request.data.get('panel_style', panel.panel_style),
+                "instructions": instructions,
+                "current_image_url": request.build_absolute_uri(panel.image.url) if panel.image and use_current_as_base else None,
+                "reference_image_url": request.build_absolute_uri(panel.reference_image.url) if panel.reference_image else None,
+                "panels": [{
+                    "id": p.id,
+                    "page_number": p.page.page_number,
+                    "order_in_page": p.order,
+                    "prompt": p.prompt,
+                    "scene_description": p.scene_description,
+                    "image_url": p.image.name if p.image else "",
+                    "status": p.status,
+                    "balloons": p.balloons,
+                    "layout": p.layout,
+                    "character_refs": p.character_refs
+                } for p in Panel.objects.filter(page__project=project)],
+                "global_context": {
+                    "style_guide": project.style_guide,
+                    "characters": [{
+                        "name": c.name,
+                        "description": c.description,
+                        "metadata": c.metadata
+                    } for c in project.characters.all()],
+                    "sceneries": [{
+                        "name": s.name,
+                        "description": s.description,
+                        "metadata": s.metadata
+                    } for s in project.sceneries.all()]
+                }
             }
             
             project.status = "generating"
             project.save()
+
+            print("PAYLOAD:", payload)
             
             client = BedrockAgentClient()
             threading.Thread(target=client.invoke, args=(payload, project.id)).start()
@@ -497,8 +537,37 @@ class RegenerateMergedPagesView(APIView):
             
             agent_url = f"{settings.AGENT_SERVICE_URL}/regenerate-merge"
             payload = {
+                "action": "regenerate_merge",
                 "project_id": str(project.id),
-                "instructions": instructions
+                "instructions": instructions,
+                "world_model_summary": project.world_model_summary,
+                "panels": [{
+                    "id": p.id,
+                    "page_number": p.page.page_number,
+                    "order_in_page": p.order,
+                    "prompt": p.prompt,
+                    "scene_description": p.scene_description,
+                    "image_url": p.image.name if p.image else "",
+                    "status": p.status,
+                    "balloons": p.balloons,
+                    "layout": p.layout,
+                    "character_refs": p.character_refs
+                } for p in Panel.objects.filter(page__project=project)],
+                "global_context": {
+                    "style_guide": project.style_guide,
+                    "characters": [{
+                        "name": c.name,
+                        "description": c.description,
+                        "metadata": c.metadata,
+                        "image_url": request.build_absolute_uri(c.image.url) if c.image else ""
+                    } for c in project.characters.all()],
+                    "sceneries": [{
+                        "name": s.name,
+                        "description": s.description,
+                        "metadata": s.metadata,
+                        "image_url": request.build_absolute_uri(s.image.url) if s.image else ""
+                    } for s in project.sceneries.all()]
+                }
             }
             
             project.status = "generating"

@@ -47,7 +47,7 @@ class Page(models.Model):
     project = models.ForeignKey(Project, related_name='pages', on_delete=models.CASCADE)
     page_number = models.IntegerField()
     layout_data = models.JSONField(default=dict) # Posiciones de paneles
-    merged_image = models.ImageField(upload_to=page_upload_path, max_length=1000, blank=True, null=True)
+    merged_image = models.ImageField(upload_to=page_upload_path, max_length=2000, blank=True, null=True)
 
     @property
     def merged_image_url(self):
@@ -60,19 +60,23 @@ class Panel(models.Model):
     order = models.IntegerField()
     prompt = models.TextField()
     scene_description = models.TextField(blank=True)
-    image = models.ImageField(upload_to=panel_upload_path, max_length=1000, blank=True, null=True)
+    image = models.ImageField(upload_to=panel_upload_path, max_length=2000, blank=True, null=True)
 
     @property
     def image_url(self):
         if self.image:
             return self.image.url
         return ""
-    status = models.CharField(max_length=50, default="pending")
+    status = models.CharField(max_length=100, default="pending")
     version = models.IntegerField(default=1)
     # Metadatos adicionales para consistencia y diálogo
     balloons = models.JSONField(default=list, blank=True)
     layout = models.JSONField(default=dict, blank=True)
     character_refs = models.JSONField(default=list, blank=True)
+    
+    # Context Engineering Overrides
+    panel_style = models.TextField(blank=True, null=True, help_text="Override style for this specific panel")
+    reference_image = models.ImageField(upload_to=panel_upload_path, max_length=2000, blank=True, null=True)
 
 class Asset(models.Model):
     project = models.ForeignKey(Project, on_delete=models.CASCADE)
@@ -84,7 +88,7 @@ class Character(models.Model):
     name = models.CharField(max_length=255)
     description = models.TextField(blank=True)
     metadata = models.JSONField(default=dict, blank=True) # Para rasgos especificos, amigos, etc.
-    image = models.ImageField(upload_to=character_upload_path, max_length=1000, blank=True, null=True)
+    image = models.ImageField(upload_to=character_upload_path, max_length=2000, blank=True, null=True)
 
     @property
     def image_url(self):
@@ -101,7 +105,7 @@ class Scenery(models.Model):
     name = models.CharField(max_length=255)
     description = models.TextField(blank=True)
     metadata = models.JSONField(default=dict, blank=True)
-    image = models.ImageField(upload_to=scenery_upload_path, max_length=1000, blank=True, null=True)
+    image = models.ImageField(upload_to=scenery_upload_path, max_length=2000, blank=True, null=True)
 
     @property
     def image_url(self):
