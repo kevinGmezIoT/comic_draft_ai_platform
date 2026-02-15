@@ -101,10 +101,15 @@ const ProjectDashboard = ({ projectId, onStartGeneration }) => {
                     : `${import.meta.env.VITE_API_URL}/projects/${projectId}/notes/`;
             }
 
+            let response;
             if (isEdit) {
-                await axios.patch(url, formData);
+                // If it's a plain object (no file), we can use JSON. 
+                // But for consistency let's use FormData if we have any files or if it's how the backend expects it.
+                // The character/scenery update views in django handle both, but let's be safe.
+                response = await axios.patch(url, formData);
             } else {
-                await axios.post(url, formData);
+                // For creations, definitely use FormData if it's there
+                response = await axios.post(url, formData);
             }
 
             setModal({ open: false, type: '', data: null });
@@ -497,12 +502,36 @@ const AssetForm = ({ type, initialData, onSubmit, onCancel }) => {
 
     const handleSubmit = (e) => {
         e.preventDefault();
-        const payload = {
-            [type === 'note' ? 'title' : 'name']: name,
-            [type === 'note' ? 'content' : 'description']: description,
-            metadata: file ? { file_name: file.name } : initialData?.metadata || {}
-        };
-        onSubmit(payload);
+        const data = new FormData();
+        data.append(type === 'note' ? 'title' : 'name', name);
+        data.append(type === 'note' ? 'content' : 'description', description);
+        if (file) {
+            data.append(type === 'note' ? 'file' : 'image', file);
+        }
+
+        // Create metadata: merge existing ones with new file info if present
+        let metadata = initialData?.metadata || {};
+
+        // Handle double-serialized or stringified metadata from legacy data
+        if (typeof metadata === 'string') {
+            try {
+                metadata = JSON.parse(metadata);
+                // Handle double serialization if necessary
+                if (typeof metadata === 'string') {
+                    metadata = JSON.parse(metadata);
+                }
+            } catch (e) {
+                console.warn("Could not parse legacy metadata, starting fresh", e);
+                metadata = {};
+            }
+        }
+
+        if (file) {
+            metadata.file_name = file.name;
+        }
+        data.append('metadata', JSON.stringify(metadata));
+
+        onSubmit(data);
     };
 
     return (

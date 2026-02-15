@@ -24,6 +24,7 @@ class ImageModelAdapter(ABC):
         import tempfile
         import boto3
         import requests
+        from urllib.parse import urlparse
         
         # 1. Obtener la imagen original (URL o S3 Key)
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
@@ -31,14 +32,36 @@ class ImageModelAdapter(ABC):
         tmp.close() # Cierra el handle para Windows
         
         try:
-            if original_image_url.startswith('http'):
-                r = requests.get(original_image_url)
+            img_url = original_image_url
+            # Re-routing logic for S3 URLs sent as HTTP
+            if img_url.startswith('http') and (".s3." in img_url or "amazonaws.com" in img_url):
+                parsed = urlparse(img_url)
+                hostname = parsed.netloc
+                parts = hostname.split('.')
+                bucket_name = parts[0]
+                key = parsed.path.lstrip('/')
+                img_url = f"s3://{bucket_name}/{key}"
+                print(f"DEBUG: edit_image Re-routed HTTP S3 URL to S3 URI: {img_url}")
+
+            if img_url.startswith('http'):
+                print(f"DEBUG: edit_image downloading from HTTP: {img_url}")
+                r = requests.get(img_url)
+                r.raise_for_status()
                 with open(tmp_path, "wb") as f:
                     f.write(r.content)
             else:
                 s3 = boto3.client("s3")
                 bucket = os.getenv("AWS_STORAGE_BUCKET_NAME")
-                s3.download_file(bucket, original_image_url, tmp_path)
+                s3_uri = img_url
+                if s3_uri.startswith('s3://'):
+                    parsed = urlparse(s3_uri)
+                    bucket = parsed.netloc
+                    s3_key = parsed.path.lstrip('/')
+                else:
+                    s3_key = s3_uri
+                
+                print(f"DEBUG: edit_image downloading from S3: {bucket}/{s3_key}")
+                s3.download_file(bucket, s3_key, tmp_path)
         
             # 2. Llamar a la implementación específica de cada modelo pasando el path local y contexto
             return self.generate_image(prompt, style_prompt=style_prompt, init_image_path=tmp_path, context_images=context_images)
@@ -138,7 +161,7 @@ class BedrockTitanAdapter(ImageModelAdapter):
                 "cfgScale": 8.0,
                 "seed": 0
             }
-        })
+        }, ensure_ascii=False)
 
         response = self.client.invoke_model(
             body=body,
@@ -170,12 +193,12 @@ class GoogleGeminiAdapter(ImageModelAdapter):
         self.llm = ChatGoogleGenerativeAI(
             model=self.model_id,
             google_api_key=self.api_key,
-            temperature=0.2
+            temperature=0.1
         )
 
     def generate_panel(self, prompt: str, style_prompt: str = "", aspect_ratio: str = "1:1", context_images: list = None, **kwargs) -> str:
         """Implementación específica de Gemini con contexto de personajes."""
-        enriched_prompt = prompt + "\nCharacter(s) reference in image(s) attached."
+        enriched_prompt = prompt
         return self.generate_image(enriched_prompt, style_prompt=style_prompt, aspect_ratio=aspect_ratio, context_images=context_images, **kwargs)
 
     def generate_page_merge(self, prompt: str, style_prompt:str, init_image_path: str = None, context_images: list = None, **kwargs) -> str:
@@ -205,53 +228,55 @@ class GoogleGeminiAdapter(ImageModelAdapter):
         try:
             message_content = []
             
-            # 1. Agregar imágenes de contexto (personajes, escenas + imagen base para I2I)
-            all_input_images = (context_images or []).copy()
-            if init_image_path and init_image_path not in all_input_images:
-                print(f"DEBUG: Adding init_image_path to Gemini context: {init_image_path}")
+            # 1. Agregar imágenes de contexto (priorizar imagen base para I2I)
+            all_input_images = []
+            
+            # La imagen base (si existe) es la más importante para I2I
+            if init_image_path:
+                print(f"DEBUG: Adding init_image_path as PRIMARY context: {init_image_path}")
                 all_input_images.append(init_image_path)
+            
+            # Luego el resto de imágenes de contexto (personajes, escenas)
+            if context_images:
+                for img in context_images:
+                    if img and img not in all_input_images:
+                        all_input_images.append(img)
 
             if all_input_images:
-                print(f"DEBUG: Adding {len(all_input_images)} input images to Gemini generation...")
-                for img_url in all_input_images:
+                print(f"DEBUG: Processing {len(all_input_images)} context images for Gemini...")
+                for idx, img_url in enumerate(all_input_images):
                     try:
                         img_bytes = None
                         if not img_url: continue
 
-                        if img_url.startswith('http'):
-                            # Detectar si es una URL de S3 (para evitar errores 403 por prefirmado expirado)
-                            if ".s3." in img_url or ".s3-" in img_url or "amazonaws.com" in img_url:
-                                print(f"DEBUG: S3 URL detected in HTTP context: {img_url}")
-                                from urllib.parse import urlparse
-                                parsed = urlparse(img_url)
-                                # Formato virtual host: bucket.s3.amazonaws.com
-                                # Formato path: s3.amazonaws.com/bucket/key
-                                hostname = parsed.netloc
-                                if hostname.endswith(".amazonaws.com"):
-                                    parts = hostname.split('.')
-                                    if "s3" in parts:
-                                        # Es S3. Si el bucket está en el hostname (virtual host)
-                                        # bucket.s3.amazonaws.com o bucket.s3-region.amazonaws.com
-                                        bucket_name = parts[0]
-                                        key = parsed.path.lstrip('/')
-                                        # Re-encaminar al bloque de S3
-                                        img_url = f"s3://{bucket_name}/{key}"
-                                        print(f"DEBUG: Re-routed HTTP S3 URL to S3 URI: {img_url}")
+                        # Normalizar el path: S3, HTTP o Local
+                        # Detectar si es una URL de S3 (para evitar errores 403 por prefirmado expirado)
+                        if str(img_url).startswith('http') and (".s3." in str(img_url) or "amazonaws.com" in str(img_url)):
+                            from urllib.parse import urlparse
+                            parsed = urlparse(str(img_url))
+                            hostname = parsed.netloc
+                            if hostname.endswith(".amazonaws.com"):
+                                parts = hostname.split('.')
+                                if "s3" in parts:
+                                    bucket_name = parts[0]
+                                    key = parsed.path.lstrip('/')
+                                    img_url = f"s3://{bucket_name}/{key}"
+                                    print(f"DEBUG: Re-routed context URL to S3 URI: {img_url}")
                             
                         # El bloque de S3 ahora manejará tanto s3:// como las re-encaminadas
-                        if img_url.startswith('http'):
-                            print(f"DEBUG: Downloading image from URL: {img_url}")
+                        if str(img_url).startswith('http'):
+                            print(f"DEBUG: Downloading context image from HTTP: {img_url}")
                             r = requests.get(img_url, timeout=15)
                             r.raise_for_status()
                             img_bytes = r.content
-                        elif img_url.startswith('s3://') or ("/" in img_url and not os.path.exists(img_url)):
-                            # Si no existe localmente y parece una ruta de S3 o key, intentar S3
+                        elif str(img_url).startswith('s3://') or ("/" in str(img_url) and not os.path.exists(img_url) and not "\\" in str(img_url)):
+                            # Si no existe localmente y parece una ruta de S3, intentar S3
                             s3_uri = img_url
-                            if not img_url.startswith('s3://'):
+                            if not str(img_url).startswith('s3://'):
                                 bucket = os.getenv("AWS_STORAGE_BUCKET_NAME")
                                 s3_uri = f"s3://{bucket}/{img_url}"
                             
-                            print(f"DEBUG: Resolving via S3: {s3_uri}")
+                            print(f"DEBUG: Resolving context via S3: {s3_uri}")
                             import boto3
                             from urllib.parse import urlparse
                             parsed = urlparse(s3_uri)
@@ -264,17 +289,27 @@ class GoogleGeminiAdapter(ImageModelAdapter):
                             with open(tmp_path, 'rb') as f:
                                 img_bytes = f.read()
                             os.remove(tmp_path)
-                            print(f"DEBUG: Successfully downloaded {len(img_bytes)} bytes from S3.")
                         else:
-                            print(f"DEBUG: Reading local image: {img_url}")
-                            # Fallback to absolute media path if relative fails
+                            # Local path (especially on Windows)
                             actual_path = img_url
-                            if not os.path.isabs(img_url) and not os.path.exists(img_url):
+                            if not os.path.exists(actual_path):
+                                # Probar con MEDIA_ROOT
                                 media_root = os.getenv("MEDIA_ROOT", "./media")
-                                actual_path = os.path.join(media_root, img_url)
-                            
-                            with open(actual_path, 'rb') as f:
-                                img_bytes = f.read()
+                                alt_path = os.path.join(media_root, img_url)
+                                if os.path.exists(alt_path):
+                                    actual_path = alt_path
+                                else:
+                                    # Probar reemplazando slash por backslash para Windows si aplica
+                                    alt_path_win = os.path.join(media_root, str(img_url).replace('/', '\\'))
+                                    if os.path.exists(alt_path_win):
+                                        actual_path = alt_path_win
+
+                            if os.path.exists(actual_path):
+                                print(f"DEBUG: Reading local context image: {actual_path}")
+                                with open(actual_path, 'rb') as f:
+                                    img_bytes = f.read()
+                            else:
+                                raise FileNotFoundError(f"Image not found at {img_url} or {actual_path}")
                         
                         if not img_bytes:
                             raise ValueError(f"No bytes retrieved for {img_url}")
@@ -312,12 +347,19 @@ class GoogleGeminiAdapter(ImageModelAdapter):
                     except Exception as e:
                         print(f"WARNING: Failed to load/normalize context image {img_url}: {e}")
 
-            # 2. Agregar prompt de texto
-            message_content.append({"type": "text", "text": prompt})
+            # 2. Agregar prompt de texto enriquecido (Explicit context usage)
+            final_prompt = prompt
+            if init_image_path:
+                final_prompt = "USE THE FIRST IMAGE ATTACHED AS THE BASE IMAGE (VARIATION/I2I).\n" + final_prompt
+            
+            if len(all_input_images) > (1 if init_image_path else 0):
+                final_prompt += "\nUSE THE OTHER ATTACHED IMAGES AS REFERENCE FOR CHARACTERS AND SCENERY CONSISTENCY."
+
+            message_content.append({"type": "text", "text": final_prompt})
 
             # 3. Agregar prompt de estilo
             if style_prompt:
-                message_content.append({"type": "text", "text": "\nESTILO: " + style_prompt})
+                message_content.append({"type": "text", "text": "\nVISUAL STYLE: " + style_prompt})
 
             # 4. Invoke model via LangChain for full traceability
             # IMPORTANT: response_modalities must be a list of Enums, not strings.

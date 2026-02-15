@@ -8,6 +8,18 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.vectorstores import Chroma
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.messages import HumanMessage
+import unicodedata
+import re
+
+def normalize_key(text: str) -> str:
+    """Normaliza una cadena para ser usada como key de JSON (sin tildes, ñ, espacios, etc)"""
+    # 1. Quitar tildes y caracteres latinos
+    text = unicodedata.normalize('NFD', text).encode('ascii', 'ignore').decode('utf-8')
+    # 2. Quedarse solo con alfanuméricos y guiones
+    text = re.sub(r'[^a-zA-Z0-9\s_-]', '', text)
+    # 3. CamelCase o snake_case? El usuario sugirió "HabitacionMarie".
+    # Vamos a simplemente quitar espacios y mantener mayúsculas para respetar el estilo existente.
+    return "".join(text.split())
 
 class KnowledgeManager:
     def __init__(self, project_id: str):
@@ -155,14 +167,18 @@ class CanonicalStore:
         try:
             print(f"Loading canon from S3: s3://{self.bucket_name}/{self.s3_key}")
             response = self.s3.get_object(Bucket=self.bucket_name, Key=self.s3_key)
-            return json.loads(response['Body'].read().decode('utf-8'))
+            data = json.loads(response['Body'].read().decode('utf-8'))
+            if "metadata" not in data:
+                data["metadata"] = {"original_keys": {}}
+            return data
         except self.s3.exceptions.NoSuchKey:
             print("Canon not found in S3, initializing new one.")
             return {
                 "characters": {},
                 "sceneries": {},
                 "style": {},
-                "continuity": {}
+                "continuity": {},
+                "metadata": { "original_keys": {} }
             }
         except Exception as e:
             print(f"Error loading canon from S3: {e}")
@@ -170,7 +186,8 @@ class CanonicalStore:
                 "characters": {},
                 "sceneries": {},
                 "style": {},
-                "continuity": {}
+                "continuity": {},
+                "metadata": { "original_keys": {} }
             }
 
     def save(self):
@@ -179,27 +196,41 @@ class CanonicalStore:
             self.s3.put_object(
                 Bucket=self.bucket_name,
                 Key=self.s3_key,
-                Body=json.dumps(self.data, indent=4),
-                ContentType='application/json'
+                Body=json.dumps(self.data, indent=4, ensure_ascii=False),
+                ContentType='application/json; charset=utf-8'
             )
         except Exception as e:
             print(f"Error saving canon to S3: {e}")
 
     def update_character(self, name: str, info: Dict):
-        if name not in self.data["characters"]:
-            self.data["characters"][name] = {}
-        self.data["characters"][name].update(info)
+        norm_key = normalize_key(name)
+        if "metadata" not in self.data: self.data["metadata"] = {"original_keys": {}}
+        self.data["metadata"]["original_keys"][norm_key] = name # Save display name
+        
+        if norm_key not in self.data["characters"]:
+            self.data["characters"][norm_key] = {}
+        self.data["characters"][norm_key].update(info)
         self.save()
 
     def update_style(self, style_info: Dict):
         self.data["style"].update(style_info)
         self.save()
 
+    def update_scenery(self, name: str, info: Dict):
+        norm_key = normalize_key(name)
+        if "metadata" not in self.data: self.data["metadata"] = {"original_keys": {}}
+        self.data["metadata"]["original_keys"][norm_key] = name # Save display name
+
+        if norm_key not in self.data["sceneries"]:
+            self.data["sceneries"][norm_key] = {}
+        self.data["sceneries"][norm_key].update(info)
+        self.save()
+
 class CharacterManager:
     """Gestiona la consistencia de personajes mediante 'Character Bibles'"""
-    def __init__(self, project_id: str):
+    def __init__(self, project_id: str, canon: Optional[CanonicalStore] = None):
         self.project_id = project_id
-        self.canon = CanonicalStore(project_id)
+        self.canon = canon or CanonicalStore(project_id)
 
     def extract_visual_traits(self, name: str, image_urls: List[str]):
         """Agent B: Vision-based trait extraction from reference images."""
@@ -285,34 +316,60 @@ class CharacterManager:
             traceback.print_exc()
 
     def register_character(self, name: str, description: str, reference_images: list):
+        # Preservar rasgos existentes si los hay
+        existing = self.canon.data.get("characters", {}).get(name, {})
+        existing_traits = existing.get("visual_traits", [])
+        
         char_info = {
             "description": description,
             "ref_images": reference_images,
-            "visual_traits": [] # To be filled by vision
+            "visual_traits": existing_traits # Preserve instead of resetting
         }
         self.canon.update_character(name, char_info)
-        # Automatic trait extraction if images present
-        if reference_images:
+        # Automatic trait extraction if images present and no traits existed
+        if reference_images and not existing_traits:
             self.extract_visual_traits(name, reference_images)
 
+    def _find_character(self, name: str) -> tuple[Optional[str], Optional[Dict]]:
+        """Busca un personaje por nombre exacto, insensible a mayúsculas o por subcadena."""
+        chars = self.canon.data.get("characters", {})
+        original_keys = self.canon.data.get("metadata", {}).get("original_keys", {})
+        
+        # 1. Usar la key normalizada para búsqueda directa
+        norm_input = normalize_key(name)
+        if norm_input in chars:
+            return original_keys.get(norm_input, norm_input), chars[norm_input]
+            
+        # 2. Búsqueda por el nombre original guardado (case-insensitive)
+        for norm_key, display_name in original_keys.items():
+            if display_name.lower() == name.lower() and norm_key in chars:
+                return display_name, chars[norm_key]
+            
+        # 3. Substring match en nombres originales
+        for norm_key, display_name in original_keys.items():
+            if (name.lower() in display_name.lower() or display_name.lower() in name.lower()) and norm_key in chars:
+                return display_name, chars[norm_key]
+        return None, None
+
     def get_character_images(self, name: str) -> List[str]:
-        char = self.canon.data["characters"].get(name)
+        name_found, char = self._find_character(name)
         if char:
             return char.get("ref_images", [])
         return []
 
     def get_character_prompt_segment(self, name: str):
-        char = self.canon.data["characters"].get(name)
+        name_found, char = self._find_character(name)
         if char:
-            traits = ", ".join(char.get("visual_traits", []))
-            trait_str = f" Rasgos visuales: {traits}." if traits else ""
-            return f"Personaje: {name}. {char['description']}.{trait_str} Mantener rigurosa consistencia con estos rasgos."
-        return f"Personaje: {name}."
+            traits = char.get("visual_traits", [])
+            trait_str = "\n".join([f"    * {t}" for t in traits]) if traits else "    * No se detectaron rasgos específicos."
+            display_name = name_found or name
+            return f"Personaje: {display_name}\n  - Descripción: {char.get('description', '')}\n  - Rasgos Visuales Críticos:\n{trait_str}"
+        return f"Personaje: {name} (Sin datos canónicos)"
 
 class StyleManager:
     """Agent B component for managing visual rules and tokens."""
-    def __init__(self, project_id: str):
-        self.canon = CanonicalStore(project_id)
+    def __init__(self, project_id: str, canon: Optional[CanonicalStore] = None):
+        self.canon = canon or CanonicalStore(project_id)
 
     def normalize_style(self, style_guide_text: str):
         if not style_guide_text or len(style_guide_text.strip()) < 10:
@@ -327,7 +384,7 @@ class StyleManager:
         {style_guide_text}
         
         INSTRUCCIONES:
-        1. Extrae únicamente descriptores de ESTILO ARTÍSTICO (técnica, líneas, paleta, iluminación).
+        1. Extrae únicamente descriptores de ESTILO ARTÍSTICO (técnica, líneas, paleta, iluminación, tipo de ilustración).
         2. IGNORA nombres de personajes, tramas o diálogos.
         3. Genera una lista de 5-10 tokens en inglés (ej: 'thick noir lines', 'pastel palette', 'watercolor textures').
         
@@ -350,6 +407,7 @@ class StyleManager:
                 content = content.split("```")[1].split("```")[0].strip()
 
             data = json.loads(content)
+            data["style_tokens"].append(style_guide_text)
             self.canon.update_style(data)
             print(f"SUCCESS: Normalized style tokens: {data.get('style_tokens')}")
         except Exception as e:
@@ -360,3 +418,130 @@ class StyleManager:
         if tokens:
             return f"Art Style: {', '.join(tokens)}. Organic comic book aesthetic."
         return "Professional comic book art style."
+
+class SceneryManager:
+    """Gestiona la consistencia de escenarios mediante 'Scenery Bibles'"""
+    def __init__(self, project_id: str, canon: Optional[CanonicalStore] = None):
+        self.project_id = project_id
+        self.canon = canon or CanonicalStore(project_id)
+
+    def extract_visual_traits(self, name: str, image_urls: List[str]):
+        """Agent B: Vision-based trait extraction from scenario reference images."""
+        if not image_urls:
+            return
+        
+        print(f"DEBUG: [SceneryManager] Starting visual trait extraction for scenario '{name}' with {len(image_urls)} images.")
+        
+        llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0)
+        
+        traits_prompt = f"""
+        Analiza estas imágenes de referencia del escenario '{name}'.
+        Extrae rasgos visuales invariantes y detallados para incluirlos en prompts de generación de imágenes.
+        Enfócate en:
+        - Arquitectura y estructura (ventanas, techos, materiales).
+        - Objetos clave y mobiliario fijo.
+        - Texturas predominantes (madera, metal, piedra).
+        - Esquema de iluminación habitual (fuentes de luz, sombras).
+        - Paleta de colores distintiva del lugar.
+        
+        Responde en formato JSON:
+        {{"traits": ["paredes de ladrillo visto", "gran ventana circular al fondo", "iluminación neón púrpura", ...]}}
+        """
+        
+        image_url = image_urls[0]
+        base_path = image_url.split('?')[0]
+        ext = os.path.splitext(base_path)[1].lower()
+        mime_type = "image/jpeg" if ext in ['.jpg', '.jpeg', '.jfif'] else "image/png"
+        
+        try:
+            if image_url.startswith("s3://"):
+                km = KnowledgeManager(self.project_id)
+                local_path = km._download_from_s3(image_url)
+                with open(local_path, "rb") as f:
+                    img_data = base64.b64encode(f.read()).decode("utf-8")
+            else:
+                import requests
+                r = requests.get(image_url, timeout=30)
+                r.raise_for_status()
+                img_data = base64.b64encode(r.content).decode("utf-8")
+
+            message = HumanMessage(
+                content=[
+                    {"type": "text", "text": traits_prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime_type};base64,{img_data}"},
+                    },
+                ]
+            )
+            
+            response = llm.invoke([message])
+            content = response.content.strip()
+            
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0].strip()
+            elif "```" in content:
+                content = content.split("```")[1].strip()
+            
+            if "{" in content:
+                start = content.find("{")
+                end = content.rfind("}") + 1
+                content = content[start:end]
+            
+            data = json.loads(content)
+            traits = data.get("traits", [])
+            self.canon.update_scenery(name, {"visual_traits": traits})
+            print(f"SUCCESS: Enhanced traits for scenery {name}: {traits}")
+        except Exception as e:
+            print(f"ERROR extracting vision traits for scenery {name}: {e}")
+
+    def register_scenery(self, name: str, description: str, reference_images: list):
+        # Preservar rasgos existentes si los hay
+        existing = self.canon.data.get("sceneries", {}).get(name, {})
+        existing_traits = existing.get("visual_traits", [])
+
+        scenery_info = {
+            "description": description,
+            "ref_images": reference_images,
+            "visual_traits": existing_traits # Preserve instead of resetting
+        }
+        self.canon.update_scenery(name, scenery_info)
+        # Automatic trait extraction if images present and no traits existed
+        if reference_images and not existing_traits:
+            self.extract_visual_traits(name, reference_images)
+
+    def _find_scenery(self, name: str) -> tuple[Optional[str], Optional[Dict]]:
+        """Busca un escenario por nombre exacto, insensible a mayúsculas o por subcadena."""
+        scenes = self.canon.data.get("sceneries", {})
+        original_keys = self.canon.data.get("metadata", {}).get("original_keys", {})
+
+        # 1. Usar la key normalizada
+        norm_input = normalize_key(name)
+        if norm_input in scenes:
+            return original_keys.get(norm_input, norm_input), scenes[norm_input]
+
+        # 2. Case-insensitive exact en nombres originales
+        for norm_key, display_name in original_keys.items():
+            if display_name.lower() == name.lower() and norm_key in scenes:
+                return display_name, scenes[norm_key]
+            
+        # 3. Substring match en nombres originales
+        for norm_key, display_name in original_keys.items():
+            if (name.lower() in display_name.lower() or display_name.lower() in name.lower()) and norm_key in scenes:
+                return display_name, scenes[norm_key]
+        return None, None
+
+    def get_scenery_images(self, name: str) -> List[str]:
+        name_found, scenery = self._find_scenery(name)
+        if scenery:
+            return scenery.get("ref_images", [])
+        return []
+
+    def get_scenery_prompt_segment(self, name: str):
+        name_found, scenery = self._find_scenery(name)
+        if scenery:
+            traits = scenery.get("visual_traits", [])
+            trait_str = "\n".join([f"    * {t}" for t in traits]) if traits else "    * No se detectaron rasgos específicos."
+            display_name = name_found or name
+            return f"Escenario: {display_name}\n  - Descripción: {scenery.get('description', '')}\n  - Arquitectura y Detalles del Entorno:\n{trait_str}"
+        return f"Escenario: {name} (Sin datos canónicos)"

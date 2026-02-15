@@ -55,7 +55,7 @@ def generate_comic_logic(project_id, sources, max_pages=3, max_panels=None, layo
         "world_model_summary": "",
         "script_outline": [],
         "current_step": "start",
-        "reference_images": [],
+        "reference_images": kwargs.get("reference_images", []),
         "global_context": kwargs.get("global_context", {})
     }
 
@@ -129,6 +129,8 @@ def regenerate_panel_logic(project_id, panel_id, prompt, scene_description, ball
         "panels": processed_panels,
         "merged_pages": [],
         "style_guide": global_context.get('style_guide', ""),
+        "current_image_url": kwargs.get('current_image_url'),
+        "reference_image_url": kwargs.get('reference_image_url'),
         "global_context": global_context
     }
     

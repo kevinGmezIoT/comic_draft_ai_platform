@@ -1,4 +1,4 @@
-from .models import Project, Page, Panel
+from .models import Project, Page, Panel, Character, Scenery
 
 def process_agent_result(project_id, data):
     """
@@ -182,6 +182,33 @@ def process_agent_result(project_id, data):
                     page.merged_image.name = clean_url
                 page.save()
                 print(f"DEBUG: [PROCESSOR] Saved Merged Image for Page {p_num}: {clean_url}")
+
+        # Character & Scenery Synchronization (Canon)
+        characters_data = result.get('characters', [])
+        for c_data in characters_data:
+            name = c_data.get('name')
+            if name:
+                Character.objects.update_or_create(
+                    project=project,
+                    name=name,
+                    defaults={
+                        "description": c_data.get('description', ''),
+                        "metadata": c_data.get('metadata', c_data.get('visual_traits', {}))
+                    }
+                )
+
+        sceneries_data = result.get('sceneries', [])
+        for s_data in sceneries_data:
+            name = s_data.get('name')
+            if name:
+                Scenery.objects.update_or_create(
+                    project=project,
+                    name=name,
+                    defaults={
+                        "description": s_data.get('description', ''),
+                        "metadata": s_data.get('metadata', s_data.get('visual_traits', {}))
+                    }
+                )
 
         project.status = 'completed'
         project.last_error = None

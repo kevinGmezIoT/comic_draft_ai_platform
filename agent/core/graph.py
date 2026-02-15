@@ -1,7 +1,7 @@
 from typing import TypedDict, List, Annotated, Dict
 from langgraph.graph import StateGraph, END
 from .adapters import get_image_adapter
-from .knowledge import KnowledgeManager, CharacterManager, StyleManager, CanonicalStore
+from .knowledge import KnowledgeManager, CharacterManager, StyleManager, SceneryManager, CanonicalStore
 from langchain_openai import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -47,8 +47,10 @@ class AgentState(TypedDict):
 class PromptBuilder:
     """Agent F: Prompt Builder - Composes layered prompts for image generation."""
     def __init__(self, project_id: str):
-        self.cm = CharacterManager(project_id)
-        self.sm = StyleManager(project_id)
+        self.canon = CanonicalStore(project_id)
+        self.cm = CharacterManager(project_id, canon=self.canon)
+        self.sm = StyleManager(project_id, canon=self.canon)
+        self.scm = SceneryManager(project_id, canon=self.canon)
         
     def build_panel_prompt(self, panel: Panel, world_summary: str, continuity_state: Dict) -> str:
         # Layer 1: Style Override or Global Style
@@ -89,8 +91,10 @@ class PromptBuilder:
                     state_str = f" [Continuidad: {', '.join(state_items)}]"
             char_parts.append(f"{base_char}{state_str}")
             
-        # Layer 3: Scene Action & Setting (Base)
-        base_scenery = panel.get('scenery', 'Basado en la escena')
+        # Layer 3: Scene Action & Setting (Base + Scenario Continuity)
+        base_scenery_name = panel.get('scenery', 'Ambientación general')
+        scenery_base_prompt = self.scm.get_scenery_prompt_segment(base_scenery_name)
+        
         env_str = ""
         if environment_continuity:
             # Flatten environmental details if they are nested
@@ -108,7 +112,7 @@ class PromptBuilder:
                 env_str = f" (Detalles de continuidad del entorno: {', '.join(env_details)})"
         
         scene_desc = panel.get('scene_description', 'Cinematic comic scene')
-        final_scenery = f"{base_scenery}{env_str}"
+        final_scenery = f"{scenery_base_prompt}{env_str}"
         
         # Layer 4: Composition & Reasoning (Agent F Art Direction)
         layout = panel.get("layout", {"w": 50, "h": 50})
@@ -122,6 +126,8 @@ class PromptBuilder:
         is_edit = panel.get("status") == "editing"
         old_prompt = panel.get("prompt", "")
 
+        char_parts_str = "\n".join(char_parts) if len(char_parts) > 0 else "N/A"
+        
         if is_edit and instructions:
             reasoning_prompt = f"""
             Actúa como un Director de Arte de Cómics. Estás EDITANDO una viñeta existente.
@@ -129,12 +135,17 @@ class PromptBuilder:
             DESCRIPCIÓN VISUAL ANTERIOR: {old_prompt}
             INSTRUCCIONES DE CAMBIO: {instructions}
             
-            NUEVO ESTILO: {style_part}
-            ESCENARIO: {final_scenery}
-            PERSONAJES: {", ".join(char_names) if len(char_names) > 0 else "Sin personaje"}
-            CONTEXTO MUNDO: {world_summary[:300]}
             DISEÑO: {w}%x{h}% ({aspect_ratio}).
-            RASGOS Y CONTINUIDAD: {" ".join(char_parts)}
+            CONTEXTO MUNDO: {world_summary[:500]}
+            
+            REGLAS CANÓNICAS DE APARIENCIA (ESTRICTO): 
+            ---
+            SCENERY:
+            {final_scenery}
+            
+            CHARACTERS:
+            {char_parts_str}
+            ---
             
             Genera un PROMPT VISUAL FINAL que describa el resultado deseado combinando la descripción original con los cambios solicitados.
             Sé específico sobre qué elementos cambian (ej: "Ahora la ventana está iluminada...") y qué elementos se mantienen.
@@ -144,13 +155,20 @@ class PromptBuilder:
         else:
             reasoning_prompt = f"""
             Actúa como un Director de Fotografía de Cómics (Agent F: Prompt Builder).
+            
             ESCENA: {scene_desc}
-            ESCENARIO: {final_scenery}
-            PERSONAJES: {", ".join(char_names) if len(char_names) > 0 else "Sin personaje"}
-            CONTEXTO MUNDO: {world_summary[:300]}
             ESTILO BASE: {style_part}
             DISEÑO PANEL: {w}% de ancho x {h}% de alto ({aspect_ratio}).
-            RASGOS CANÓNICOS Y CONTINUIDAD: {" ".join(char_parts) if len(char_parts) > 0 else "Sin personaje"}
+            CONTEXTO MUNDO: {world_summary[:500]}
+            
+            REGLAS CANÓNICAS DE APARIENCIA (ESTRICTO):
+            ---
+            SCENERY:
+            {final_scenery}
+            
+            CHARACTERS:
+            {char_parts_str}
+            ---
             
             Genera un PROMPT VISUAL FINAL para Stable Diffusion / DALL-E.
             Mejora la composición, iluminación y ángulo de cámara para este layout.
@@ -187,14 +205,15 @@ class ContinuitySupervisor:
         
         Instrucciones:
         1. Identifica cambios en: ropa, heridas, objetos en mano, ubicación o estado del entorno.
-        2. Mantén la consistencia con el estado anterior si no hay cambios.
-        3. Responde ÚNICAMENTE con un JSON que tenga esta estructura exacta:
+        2. Para el 'environment', sé específico sobre la zona del escenario (ej: 'escritorio', 'junto a la puerta') para mantener la lógica espacial.
+        3. Mantén la consistencia con el estado anterior si no hay cambios.
+        4. Responde ÚNICAMENTE con un JSON que tenga esta estructura exacta:
         {{
             "characters": {{
-                "NombrePersonaje": {{ "ropa": "...", "heridas": "...", "objetos": "...", "ubicacion": "..." }}
+                "NombrePersonaje": {{ "ropa": "...", "heridas": "...", "objetos": "...", "ubicación_exacta": "..." }}
             }},
             "environment": {{
-                "iluminacion": "...", "detalles": "...", "estado_objetos": "..."
+                "zona": "...", "iluminacion": "...", "objetos_movidos": "...", "detalles_persistentes": "..."
             }}
         }}
 
@@ -294,24 +313,58 @@ def ingest_and_rag(state: AgentState):
 
 def world_model_builder(state: AgentState):
     print("--- WORLD MODEL BUILDING (Characters & Scenarios) ---")
-    cm = CharacterManager(state["project_id"])
+    canon = CanonicalStore(state["project_id"])
+    cm = CharacterManager(state["project_id"], canon=canon)
+    scm = SceneryManager(state["project_id"], canon=canon)
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
     
-    # Pre-cargar personajes conocidos desde el backend si existen
+    # Pre-cargar personajes y escenarios conocidos desde el backend si existen
     backend_chars = state.get("global_context", {}).get("characters", [])
-    known_character_images = {c["name"].lower(): [c["image_url"]] for c in backend_chars if c.get("image_url")}
+    backend_scenes = state.get("global_context", {}).get("sceneries", [])
     
+    known_character_images = {c["name"].lower(): [c["image_url"]] for c in backend_chars if c.get("image_url")}
+    known_scenery_images = {s["name"].lower(): [s["image_url"]] for s in backend_scenes if s.get("image_url")}
+    
+    # 1. Registrar OBLIGATORIAMENTE los personajes y escenarios del wizard (backend)
+    for b_char in backend_chars:
+        name = b_char["name"]
+        description = b_char.get("description", "")
+        img_url = b_char.get("image_url")
+        cm.register_character(name, description, [img_url] if img_url else [])
+        print(f"DEBUG: [Wizard Asset] Character '{name}' registered from backend.")
+
+    for b_scene in backend_scenes:
+        name = b_scene["name"]
+        description = b_scene.get("description", "")
+        img_url = b_scene.get("image_url")
+        scm.register_scenery(name, description, [img_url] if img_url else [])
+        print(f"DEBUG: [Wizard Asset] Scenery '{name}' registered from backend.")
+
+    # Recargar listas actualizadas del canon para el prompt
+    existing_chars = list(cm.canon.data.get("characters", {}).keys())
+    existing_scenes = list(scm.canon.data.get("sceneries", {}).keys())
+    original_names_map = cm.canon.data.get("metadata", {}).get("original_keys", {})
+    
+    display_chars = [original_names_map.get(k, k) for k in existing_chars]
+    display_scenes = [original_names_map.get(k, k) for k in existing_scenes]
+
     prompt = f"""
-    Basándote en este resumen del mundo, identifica a los personajes principales.
-    Para cada personaje, extrae su nombre en una sola palabra y una descripción física detallada para generación de imágenes.
+    Basándote en este resumen del mundo, identifica a los personajes principales y los escenarios clave.
     
     RESUMEN:
     {state['world_model_summary']}
     
+    ACTIVOS YA REGISTRADOS (USA ESTOS NOMBRES EXACTOS SI COINCIDEN O DESCRÍBELOS MEJOR):
+    - Personajes: {', '.join(display_chars) if display_chars else "Ninguno"}
+    - Escenarios: {', '.join(display_scenes) if display_scenes else "Ninguno"}
+    
     IMÁGENES DE REFERENCIA DISPONIBLES (archivos): {", ".join([os.path.basename(p) for p in state.get("reference_images", [])])}
     
     Responde en formato JSON:
-    {{"characters": [{{"name": "primer nombre del personaje (Una sola palabra)", "description": "..."}}]}}
+    {{
+        "characters": [{{"name": "nombre (Respetar nombres ya listados)", "description": "..."}}],
+        "sceneries": [{{"name": "nombre (Respetar nombres ya listados)", "description": "descripción visual detallada"}}]
+    }}
     """
     
     try:
@@ -323,45 +376,76 @@ def world_model_builder(state: AgentState):
         
         ref_images = state.get("reference_images", [])
         
+        # Ingest Characters
         for char in data.get("characters", []):
             name = char["name"]
             description = char["description"]
             images = []
             
-            # 1. Intentar match con backend (Mejorado: match parcial)
-            matched_url = None
+            # Match logic for characters
+            # Usar fuzzy matching para ver si ya existe en el canon
+            name_canon, existing_char = cm._find_character(name)
+            target_name = name_canon if name_canon else name
+            
+            if existing_char:
+                # Si existe, preservamos descripción e imágenes previas si no vienen nuevas
+                images = existing_char.get("ref_images", [])
+            
+            # Intentar mapear imágenes del backend
             for b_name, b_urls in known_character_images.items():
-                if name.lower() in b_name or b_name in name.lower():
-                    matched_url = b_urls[0]
-                    print(f"DEBUG: Character '{name}' matched with backend character '{b_name}'")
+                if target_name.lower() in b_name or b_name in target_name.lower():
+                    if b_urls[0] not in images:
+                        images.append(b_urls[0])
                     break
             
-            if matched_url:
-                images.append(matched_url)
-            
-            # 2. Intentar match con archivos subidos (via sugerencia del LLM o nombre)
-            suggested_file = char.get("suggested_image_file")
-            if suggested_file and suggested_file != "null":
-                for p in ref_images:
-                    if suggested_file in p:
-                        images.append(p)
-                        print(f"DEBUG: Character '{name}' matched with suggested file '{suggested_file}'")
-                        break
-            
-            # Fallback: buscar por nombre en los archivos
+            # Buscar en archivos de referencia si aún no hay imágenes
             if not images:
                 for p in ref_images:
-                    if name.lower() in p.lower():
+                    # Normalización básica para matching de archivos: "nombre personaje" -> "nombrepersonaje"
+                    clean_name = target_name.lower().replace(" ", "").replace("_", "")
+                    clean_path = os.path.basename(p).lower().replace(" ", "").replace("_", "")
+                    if clean_name in clean_path:
                         images.append(p)
-                        print(f"DEBUG: Character '{name}' matched by name in file '{p}'")
                         break
 
-            unique_images = list(set(images))
-            cm.register_character(name, description, unique_images)
-            print(f"Registered character: {name} with {len(unique_images)} images. URLs: {unique_images}")
+            cm.register_character(target_name, description, list(set(images)))
+            
+        # Ingest Sceneries
+        for scene in data.get("sceneries", []):
+            name = scene["name"]
+            description = scene["description"]
+            images = []
+            
+            # Usar fuzzy matching para ver si ya existe en el canon
+            name_canon, existing_scene = scm._find_scenery(name)
+            target_name = name_canon if name_canon else name
+
+            if existing_scene:
+                images = existing_scene.get("ref_images", [])
+            
+            # 1. Match con backend
+            for b_name, b_urls in known_scenery_images.items():
+                if target_name.lower() in b_name or b_name in target_name.lower():
+                    if b_urls[0] not in images:
+                        images.append(b_urls[0])
+                    print(f"DEBUG: Scenery '{target_name}' matched with backend scenery '{b_name}'")
+                    break
+            
+            # 2. Match con archivos por nombre
+            if not images:
+                for p in ref_images:
+                    clean_name = target_name.lower().replace(" ", "").replace("_", "")
+                    clean_path = os.path.basename(p).lower().replace(" ", "").replace("_", "")
+                    if clean_name in clean_path:
+                        images.append(p)
+                        print(f"DEBUG: Scenery '{target_name}' matched by name in file '{p}'")
+                        break
+            
+            scm.register_scenery(target_name, description, list(set(images)))
+            print(f"Registered scenery: {target_name} with {len(images)} images.")
             
     except Exception as e:
-        print(f"Error extracting characters: {e}")
+        print(f"Error extracting world elements: {e}")
         
     return {"current_step": "planner", "continuity_state": {}, "canvas_dimensions": "800x1100 (A4)"}
 
@@ -396,10 +480,29 @@ def planner(state: AgentState):
         structure_str = f"ESTRUCTURA DE LIENZO ACTUAL (REQUERIDA): {', '.join(parts)}."
     
     print("--- STRATEGIC PLANNING ---")
+    canon = CanonicalStore(state["project_id"])
+    cm = CharacterManager(state["project_id"], canon=canon)
+    scm = SceneryManager(state["project_id"], canon=canon)
+    
+    # Obtener nombres existentes para estandarización
+    existing_chars = list(cm.canon.data.get("characters", {}).keys())
+    existing_scenes = list(scm.canon.data.get("sceneries", {}).keys())
+    
+    assets_context = ""
+    if existing_chars or existing_scenes:
+        assets_context = "LISTA DE ACTIVOS EXISTENTES (USA ESTOS NOMBRES EXACTOS):\n"
+        if existing_chars:
+            assets_context += f"- PERSONAJES: {', '.join(existing_chars)}\n"
+        if existing_scenes:
+            assets_context += f"- ESCENARIOS: {', '.join(existing_scenes)}\n"
+        assets_context += "Si el guión requiere un escenario o personaje que no está en esta lista, intenta usar el más parecido o crea uno nuevo solo si es estrictamente necesario.\n"
+
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
     
     prompt = f"""
     Basándote en el siguiente SUMMARY del mundo y SCRIPT:
+    
+    {assets_context}
     
     SUMMARY:
     {state['world_model_summary']}
@@ -531,8 +634,9 @@ def image_generator(state: AgentState):
     
     sorted_panels = sorted(state["panels"], key=lambda x: (x.get('page_number', 1), x.get('order_in_page', 0)))
     
-    # Identificar personajes y sus imágenes de referencia para contexto multimodal
-    cm = pb.cm # Usar el CharacterManager de PromptBuilder
+    # Identificar personajes y escenarios para contexto multimodal
+    cm = pb.cm 
+    scm = pb.scm
     
     target_panel_id = str(state.get("panel_id")) if state.get("panel_id") else None
 
@@ -572,6 +676,13 @@ def image_generator(state: AgentState):
             if char_refs:
                 context_images.extend(char_refs)
         
+        # 1b. Escenario reference
+        scene_name = panel.get("scenery")
+        if scene_name:
+            scene_refs = scm.get_scenery_images(scene_name)
+            if scene_refs:
+                context_images.extend(scene_refs)
+        
         # Add reference image context
         # Prioritize top-level reference_image_url for the target panel
         ref_img = None
@@ -582,6 +693,14 @@ def image_generator(state: AgentState):
             
         if ref_img:
             context_images.append(ref_img)
+        
+        # If we are regenerating a target panel but NOT using I2I, 
+        # still add the current image as a REFERENCE for consistency
+        if is_target and not current_img:
+            existing_url = panel.get("image_url")
+            if existing_url and existing_url not in context_images:
+                print(f"DEBUG: Adding existing panel image as REFERENCE context (non-I2I): {existing_url}")
+                context_images.append(existing_url)
         
         # Eliminar duplicados manteniendo orden
         seen = set()

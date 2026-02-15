@@ -4,7 +4,7 @@ from django.conf import settings
 from .agent_utils import BedrockAgentClient
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework import status
+from rest_framework import status, parsers
 from .models import Project, Page, Panel, Character, Scenery
 from .result_processor import process_agent_result
 
@@ -135,12 +135,10 @@ class GenerateComicView(APIView):
         sources = []
         if script_note and script_note.file:
             # Si usamos S3, .url nos da la URL completa (puede ser presigned)
-            # El Agente puede manejar URLs de S3 directamente si tiene permisos o si la URL es pública/presigned
             sources.append(script_note.file.url)
         else:
             # Fallback por si no hay archivo, pero ya no es hardcoded a un bucket fijo ajeno
             sources = state_sources if (state_sources := request.data.get("sources")) else []
-        
         payload = {
             "project_id": str(project.id),
             "sources": sources,
@@ -157,19 +155,19 @@ class GenerateComicView(APIView):
                     "name": c.name,
                     "description": c.description,
                     "metadata": c.metadata,
-                    "image_url": request.build_absolute_uri(c.image.url) if c.image else ""
+                    "image_url": c.image.name if c.image else ""
                 } for c in project.characters.all()],
                 "sceneries": [{
                     "name": s.name,
                     "description": s.description,
                     "metadata": s.metadata,
-                    "image_url": request.build_absolute_uri(s.image.url) if s.image else ""
+                    "image_url": s.image.name if s.image else ""
                 } for s in project.sceneries.all()]
             }
         }
 
         import json
-        print(f"DEBUG: Payload sent to Agent: {json.dumps(payload, indent=2)}")
+        print(f"DEBUG: Payload sent to Agent: {json.dumps(payload, indent=2, ensure_ascii=False)}")
 
         print(f"DEBUG: Enviando peticion al Bedrock Agent: {project.id}")
         try:
@@ -325,6 +323,7 @@ class CharacterListView(APIView):
         } for c in characters])
 
 class CharacterDetailView(APIView):
+    parser_classes = (parsers.MultiPartParser, parsers.FormParser, parsers.JSONParser)
     def get(self, request, character_id):
         try:
             c = Character.objects.get(id=character_id)
@@ -343,9 +342,25 @@ class CharacterDetailView(APIView):
             c = Character.objects.get(id=character_id)
             c.name = request.data.get('name', c.name)
             c.description = request.data.get('description', c.description)
-            c.metadata = request.data.get('metadata', c.metadata)
-            if 'image_url' in request.data:
+            
+            # Handle metadata coming as string from FormData
+            metadata = request.data.get('metadata')
+            if metadata:
+                import json
+                if isinstance(metadata, str):
+                    try:
+                        c.metadata = json.loads(metadata)
+                    except json.JSONDecodeError:
+                        pass
+                else:
+                    c.metadata = metadata
+
+            image_file = request.FILES.get('image')
+            if image_file:
+                c.image = image_file
+            elif 'image_url' in request.data:
                 c.image.name = request.data.get('image_url')
+            
             c.save()
             return Response({"status": "updated"})
         except Character.DoesNotExist:
@@ -360,14 +375,25 @@ class CharacterDetailView(APIView):
             return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
 
 class CharacterCreateView(APIView):
+    parser_classes = (parsers.MultiPartParser, parsers.FormParser, parsers.JSONParser)
     def post(self, request, project_id):
         try:
             project = Project.objects.get(id=project_id)
+            
+            # Handle metadata coming as string from FormData
+            metadata = request.data.get('metadata', {})
+            if isinstance(metadata, str):
+                import json
+                try:
+                    metadata = json.loads(metadata)
+                except json.JSONDecodeError:
+                    metadata = {}
+
             character = Character.objects.create(
                 project=project,
                 name=request.data.get('name'),
                 description=request.data.get('description', ''),
-                metadata=request.data.get('metadata', {}),
+                metadata=metadata,
             )
             image_file = request.FILES.get('image')
             if image_file:
@@ -394,6 +420,7 @@ class SceneryListView(APIView):
         } for s in sceneries])
 
 class SceneryDetailView(APIView):
+    parser_classes = (parsers.MultiPartParser, parsers.FormParser, parsers.JSONParser)
     def get(self, request, scenery_id):
         try:
             s = Scenery.objects.get(id=scenery_id)
@@ -412,9 +439,25 @@ class SceneryDetailView(APIView):
             s = Scenery.objects.get(id=scenery_id)
             s.name = request.data.get('name', s.name)
             s.description = request.data.get('description', s.description)
-            s.metadata = request.data.get('metadata', s.metadata)
-            if 'image_url' in request.data:
+            
+            # Handle metadata coming as string from FormData
+            metadata = request.data.get('metadata')
+            if metadata:
+                import json
+                if isinstance(metadata, str):
+                    try:
+                        s.metadata = json.loads(metadata)
+                    except json.JSONDecodeError:
+                        pass
+                else:
+                    s.metadata = metadata
+
+            image_file = request.FILES.get('image')
+            if image_file:
+                s.image = image_file
+            elif 'image_url' in request.data:
                 s.image.name = request.data.get('image_url')
+            
             s.save()
             return Response({"status": "updated"})
         except Scenery.DoesNotExist:
@@ -429,14 +472,25 @@ class SceneryDetailView(APIView):
             return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
 
 class SceneryCreateView(APIView):
+    parser_classes = (parsers.MultiPartParser, parsers.FormParser, parsers.JSONParser)
     def post(self, request, project_id):
         try:
             project = Project.objects.get(id=project_id)
+            
+            # Handle metadata coming as string from FormData
+            metadata = request.data.get('metadata', {})
+            if isinstance(metadata, str):
+                import json
+                try:
+                    metadata = json.loads(metadata)
+                except json.JSONDecodeError:
+                    metadata = {}
+
             scenery = Scenery.objects.create(
                 project=project,
                 name=request.data.get('name'),
                 description=request.data.get('description', ''),
-                metadata=request.data.get('metadata', {}),
+                metadata=metadata,
             )
             image_file = request.FILES.get('image')
             if image_file:
@@ -501,8 +555,8 @@ class RegeneratePanelView(APIView):
                 "balloons": panel.balloons,
                 "panel_style": panel.panel_style or '',
                 "instructions": instructions,
-                "current_image_url": request.build_absolute_uri(panel.image.url) if panel.image and use_current_as_base else None,
-                "reference_image_url": request.build_absolute_uri(panel.reference_image.url) if panel.reference_image else None,
+                "current_image_url": panel.image.name if panel.image and use_current_as_base else None,
+                "reference_image_url": panel.reference_image.name if panel.reference_image else None,
                 "panels": [{
                     "id": p.id,
                     "page_number": p.page.page_number,
@@ -525,7 +579,8 @@ class RegeneratePanelView(APIView):
                     "sceneries": [{
                         "name": s.name,
                         "description": s.description,
-                        "metadata": s.metadata
+                        "metadata": s.metadata,
+                        "image_url": request.build_absolute_uri(s.image.url) if s.image else ""
                     } for s in project.sceneries.all()]
                 }
             }
@@ -575,13 +630,13 @@ class RegenerateMergedPagesView(APIView):
                         "name": c.name,
                         "description": c.description,
                         "metadata": c.metadata,
-                        "image_url": request.build_absolute_uri(c.image.url) if c.image else ""
+                        "image_url": c.image.name if c.image else ""
                     } for c in project.characters.all()],
                     "sceneries": [{
                         "name": s.name,
                         "description": s.description,
                         "metadata": s.metadata,
-                        "image_url": request.build_absolute_uri(s.image.url) if s.image else ""
+                        "image_url": s.image.name if s.image else ""
                     } for s in project.sceneries.all()]
                 }
             }
