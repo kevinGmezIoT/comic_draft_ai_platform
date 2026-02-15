@@ -43,6 +43,8 @@ class AgentState(TypedDict):
     continuity_state: Dict[str, Dict] # State tracking for Agent H
     reference_images: List[str]
     global_context: Dict # Optional metadata from backend
+    page_summaries: Dict[int, str] # Per-page detailed summaries from story understanding
+    panel_purposes: Dict[str, str] # Panel key -> underlying purpose/intent
 
 class PromptBuilder:
     """Agent F: Prompt Builder - Composes layered prompts for image generation."""
@@ -305,10 +307,186 @@ def ingest_and_rag(state: AgentState):
         print("DEBUG: [Agent B] Skipping style normalization (already set or no input available).")
     
     return {
-        "current_step": "world_model_builder", 
+        "current_step": "story_understanding", 
         "world_model_summary": summary,
         "full_script": full_script,
         "reference_images": image_paths
+    }
+
+def story_understanding(state: AgentState):
+    """Story Understanding Node: Reads the full script in batches and extracts
+    1. Detailed page summaries (heuristic analysis)
+    2. Underlying panel/vignette purposes
+    Designed to handle scripts of 100+ pages via chunked processing."""
+    print("--- STORY UNDERSTANDING (Deep Script Analysis) ---")
+    
+    full_script = state.get("full_script", "")
+    sources = state.get("sources", [])
+    project_id = state.get("project_id")
+    
+    # ── Step 1: Obtain raw pages from the PDF (or fallback to text chunks) ──
+    raw_pages: Dict[int, str] = {}  # page_number -> text content
+    
+    # Try to load pages directly from the PDF source for page-level fidelity
+    pdf_loaded = False
+    for url in sources:
+        ext = os.path.splitext(url.split('?')[0])[1].lower()
+        if ext == '.pdf':
+            try:
+                km = KnowledgeManager(project_id)
+                if url.startswith("s3://"):
+                    local_path = km._download_from_s3(url)
+                elif url.startswith("http"):
+                    from urllib.parse import urlparse
+                    parsed = urlparse(url)
+                    hostname = parsed.netloc
+                    if hostname.endswith(".amazonaws.com"):
+                        parts = hostname.split('.')
+                        if "s3" in parts:
+                            bucket_name = parts[0]
+                            key = parsed.path.lstrip('/')
+                            s3_uri = f"s3://{bucket_name}/{key}"
+                            local_path = km._download_from_s3(s3_uri)
+                        else:
+                            continue
+                    else:
+                        import requests as req
+                        temp_dir = "./data/temp_downloads"
+                        os.makedirs(temp_dir, exist_ok=True)
+                        local_path = os.path.join(temp_dir, os.path.basename(parsed.path))
+                        r = req.get(url, stream=True, timeout=60)
+                        r.raise_for_status()
+                        with open(local_path, 'wb') as f:
+                            for chunk in r.iter_content(chunk_size=8192):
+                                f.write(chunk)
+                else:
+                    local_path = url
+                
+                from langchain_community.document_loaders import PyPDFLoader
+                loader = PyPDFLoader(local_path)
+                pages = loader.load()
+                for doc in pages:
+                    pg = doc.metadata.get("page", 0) + 1  # 1-indexed
+                    raw_pages[pg] = doc.page_content
+                pdf_loaded = True
+                print(f"DEBUG: [StoryUnderstanding] Loaded {len(raw_pages)} pages from PDF.")
+                break  # Only process first PDF found
+            except Exception as e:
+                print(f"WARNING: [StoryUnderstanding] Could not load PDF pages: {e}")
+    
+    # Fallback: split full_script into synthetic pages if no PDF loaded
+    if not pdf_loaded and full_script:
+        print("DEBUG: [StoryUnderstanding] No PDF pages loaded; splitting full_script into synthetic pages.")
+        CHARS_PER_PAGE = 3000
+        for i in range(0, len(full_script), CHARS_PER_PAGE):
+            page_num = (i // CHARS_PER_PAGE) + 1
+            raw_pages[page_num] = full_script[i:i + CHARS_PER_PAGE]
+    
+    if not raw_pages:
+        print("WARNING: [StoryUnderstanding] No script content to analyze. Skipping.")
+        return {
+            "current_step": "world_model_builder",
+            "page_summaries": {},
+            "panel_purposes": {}
+        }
+    
+    total_pages = len(raw_pages)
+    print(f"DEBUG: [StoryUnderstanding] Total pages to analyze: {total_pages}")
+    
+    # ── Step 2: Batch processing – analyze pages in groups of BATCH_SIZE ──
+    BATCH_SIZE = 10  # Process 10 pages at a time to stay within context limits
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    
+    page_summaries: Dict[int, str] = {}
+    panel_purposes: Dict[str, str] = {}  # key: "page_{n}_panel_{m}" -> purpose
+    
+    sorted_page_nums = sorted(raw_pages.keys())
+    
+    for batch_start in range(0, len(sorted_page_nums), BATCH_SIZE):
+        batch_page_nums = sorted_page_nums[batch_start:batch_start + BATCH_SIZE]
+        batch_text = ""
+        for pg in batch_page_nums:
+            batch_text += f"\n\n=== PÁGINA {pg} ===\n{raw_pages[pg]}"
+        
+        print(f"DEBUG: [StoryUnderstanding] Processing batch: pages {batch_page_nums[0]}-{batch_page_nums[-1]} ({len(batch_text)} chars)")
+        
+        prompt = f"""
+        Actúa como un Analista de Guiones de Cómic experto.
+        
+        Tu tarea es leer el siguiente fragmento de guión (páginas {batch_page_nums[0]} a {batch_page_nums[-1]}) y producir DOS tipos de análisis:
+        
+        ### 1. RESUMEN DETALLADO POR PÁGINA
+        Para cada página del fragmento, genera un resumen visual detallado que describa:
+        - Qué sucede narrativamente (acción, diálogo clave, progresión dramática).
+        - El tono emocional dominante (tensión, calma, humor, misterio, etc.).
+        - Los elementos visuales clave que un artista necesitaría saber.
+        - Transiciones importantes respecto a la página anterior (si aplica).
+        
+        ### 2. PROPÓSITO SUBYACENTE DE CADA VIÑETA/PANEL
+        Identifica cada viñeta o panel descrito en el guión y asígnale un "propósito subyacente":
+        - ¿Cuál es la intención narrativa de esta viñeta? (ej: "Establecer la soledad del personaje",
+          "Mostrar la magnitud del escenario", "Revelar un giro argumental", "Generar tensión antes del clímax").
+        - ¿Qué emoción debe evocar en el lector?
+        - ¿Qué elemento visual es el foco principal?
+        
+        TEXTO DEL GUIÓN:
+        {batch_text}
+        
+        Responde ÚNICAMENTE en JSON con esta estructura:
+        {{
+            "page_summaries": {{
+                "<número_de_página>": "Resumen detallado de la página..."
+            }},
+            "panel_purposes": {{
+                "page_<N>_panel_<M>": "Propósito subyacente: ..."
+            }}
+        }}
+        
+        REGLAS:
+        - Para panel_purposes, usa la convención "page_N_panel_M" donde N es el número de página y M empieza en 1.
+        - Si una página no tiene viñetas claramente definidas, trata toda la página como un solo panel.
+        - Sé preciso y detallado en los resúmenes. Un buen resumen tiene 3-5 oraciones.
+        - Los propósitos deben ser concisos (1-2 oraciones) pero específicos.
+        """
+        
+        try:
+            response = llm.invoke([
+                SystemMessage(content="Eres un analista experto de guiones de cómic. Responde siempre en JSON válido."),
+                HumanMessage(content=prompt)
+            ])
+            
+            content = response.content.strip()
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0].strip()
+            elif "```" in content:
+                content = content.split("```")[1].split("```")[0].strip()
+            
+            batch_data = json.loads(content)
+            
+            # Merge page summaries
+            for pg_str, summary in batch_data.get("page_summaries", {}).items():
+                try:
+                    page_summaries[int(pg_str)] = summary
+                except (ValueError, TypeError):
+                    page_summaries[pg_str] = summary
+            
+            # Merge panel purposes
+            panel_purposes.update(batch_data.get("panel_purposes", {}))
+            
+            print(f"DEBUG: [StoryUnderstanding] Batch done. Summaries so far: {len(page_summaries)}, Purposes so far: {len(panel_purposes)}")
+            
+        except Exception as e:
+            print(f"ERROR: [StoryUnderstanding] Batch {batch_page_nums[0]}-{batch_page_nums[-1]} failed: {e}")
+            # Fallback: store raw text as summary for these pages
+            for pg in batch_page_nums:
+                page_summaries[pg] = raw_pages[pg][:500] + "..." if len(raw_pages[pg]) > 500 else raw_pages[pg]
+    
+    print(f"DEBUG: [StoryUnderstanding] ✓ Complete. {len(page_summaries)} page summaries, {len(panel_purposes)} panel purposes extracted.")
+    
+    return {
+        "current_step": "world_model_builder",
+        "page_summaries": page_summaries,
+        "panel_purposes": panel_purposes
     }
 
 def world_model_builder(state: AgentState):
@@ -659,6 +837,16 @@ def image_generator(state: AgentState):
         # Agent F: Build Layered Prompt
         augmented_prompt = pb.build_panel_prompt(panel, state["world_model_summary"], continuity)
         
+        # Enrich with panel purpose from Story Understanding
+        panel_purposes = state.get("panel_purposes", {})
+        page_num = panel.get("page_number", 1)
+        order = panel.get("order_in_page", 0)
+        purpose_key = f"page_{page_num}_panel_{order + 1}"
+        panel_purpose = panel_purposes.get(purpose_key, "")
+        if panel_purpose:
+            augmented_prompt = f"NARRATIVE PURPOSE: {panel_purpose}\n\n{augmented_prompt}"
+            print(f"DEBUG: [StoryUnderstanding -> Generator] Panel {panel.get('id')} enriched with purpose: {panel_purpose[:80]}...")
+        
         # Image-to-Image support if current_image_url is provided
         current_img = None
         if is_target:
@@ -928,7 +1116,14 @@ def page_merger(state: AgentState):
         user_instr = state.get('instructions', '')
         instr_part = f"\nUSER INSTRUCTIONS: {user_instr}" if user_instr else ""
 
-        merge_prompt = f"ORGANIC COMIC PAGE MERGE. \nInstrucciones visuales: {visual_blend_description} {instr_part} \nPágina en el guión: {page_num}\nStyle: {state.get('world_model_summary', '')}. Professional comic art style."
+        # Enrich with page summary from Story Understanding
+        page_summaries = state.get("page_summaries", {})
+        page_summary = page_summaries.get(int(page_num), page_summaries.get(str(page_num), ""))
+        summary_part = f"\nPAGE NARRATIVE CONTEXT: {page_summary}" if page_summary else ""
+        if page_summary:
+            print(f"DEBUG: [StoryUnderstanding -> Merger] Page {page_num} enriched with summary: {page_summary[:100]}...")
+
+        merge_prompt = f"ORGANIC COMIC PAGE MERGE. \nInstrucciones visuales: {visual_blend_description} {instr_part}{summary_part} \nPágina en el guión: {page_num}\nStyle: {state.get('world_model_summary', '')}. Professional comic art style."
         
         # CONTINUIDAD: Agregar la página anterior como referencia visual si existe
         merge_context_images = []
@@ -1036,6 +1231,7 @@ def create_comic_graph():
     workflow = StateGraph(AgentState)
 
     workflow.add_node("ingest", ingest_and_rag)
+    workflow.add_node("story_understanding", story_understanding)
     workflow.add_node("world_model_builder", world_model_builder)
     workflow.add_node("planner", planner)
     workflow.add_node("layout_designer", layout_designer)
@@ -1060,7 +1256,8 @@ def create_comic_graph():
         }
     )
 
-    workflow.add_edge("ingest", "world_model_builder")
+    workflow.add_edge("ingest", "story_understanding")
+    workflow.add_edge("story_understanding", "world_model_builder")
     workflow.add_edge("world_model_builder", "planner")
     workflow.add_edge("planner", "layout_designer")
 
