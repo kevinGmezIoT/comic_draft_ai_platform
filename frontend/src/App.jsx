@@ -955,10 +955,22 @@ function App() {
                                         onChange={async (e) => {
                                             const file = e.target.files[0];
                                             if (file) {
+                                                setLoading(true);
                                                 const formData = new FormData();
                                                 formData.append('image', file);
-                                                // Assuming a helper or just uploading it
-                                                alert("Función de subida de referencia: Deberías implementar la subida a S3/Backend aquí.");
+                                                try {
+                                                    await axios.post(`${import.meta.env.VITE_API_URL}/panels/${selectedPanel.id}/upload-reference/`, formData, {
+                                                        headers: { 'Content-Type': 'multipart/form-data' }
+                                                    });
+                                                    await fetchProjectData();
+                                                    // Actualizar el panel seleccionado localmente para reflejar el cambio inmediato
+                                                    setSelectedPanel(prev => ({ ...prev, reference_image: true }));
+                                                } catch (err) {
+                                                    console.error("Error uploading reference image:", err);
+                                                    setError("Error al subir la imagen de referencia.");
+                                                } finally {
+                                                    setLoading(false);
+                                                }
                                             }
                                         }}
                                     />

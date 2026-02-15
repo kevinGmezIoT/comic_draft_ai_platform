@@ -19,7 +19,7 @@ class ImageModelAdapter(ABC):
         """Especializado para la unión orgánica de páginas."""
         return self.generate_image(prompt, style_prompt=style_prompt, init_image_path=init_image_path, context_images=context_images, **kwargs)
 
-    def edit_image(self, original_image_url: str, prompt: str, style_prompt:str, mask_url: str = None) -> str:
+    def edit_image(self, original_image_url: str, prompt: str, style_prompt:str, mask_url: str = None, context_images: list = None) -> str:
         """Edits an existing image (Inpainting/Outpainting/Variation)"""
         import tempfile
         import boto3
@@ -38,10 +38,10 @@ class ImageModelAdapter(ABC):
             else:
                 s3 = boto3.client("s3")
                 bucket = os.getenv("AWS_STORAGE_BUCKET_NAME")
-                s3.download_fileobj(bucket, original_image_url, tmp_path)
+                s3.download_file(bucket, original_image_url, tmp_path)
         
-            # 2. Llamar a la implementación específica de cada modelo pasando el path local
-            return self.generate_image(prompt, style_prompt=style_prompt, init_image_path=tmp_path)
+            # 2. Llamar a la implementación específica de cada modelo pasando el path local y contexto
+            return self.generate_image(prompt, style_prompt=style_prompt, init_image_path=tmp_path, context_images=context_images)
         finally:
             if os.path.exists(tmp_path):
                 try: os.remove(tmp_path)
@@ -70,7 +70,7 @@ class OpenAIAdapter(ImageModelAdapter):
     def __init__(self):
         self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-    def generate_image(self, prompt: str, aspect_ratio: str = "1:1", init_image_path: str = None, context_images: list = None, **kwargs) -> str:
+    def generate_image(self, prompt: str, style_prompt: str = "", aspect_ratio: str = "1:1", init_image_path: str = None, context_images: list = None, **kwargs) -> str:
         import requests
         
         # Mapear aspect ratio a dimensiones de DALL-E 3
@@ -103,14 +103,14 @@ class OpenAIAdapter(ImageModelAdapter):
         img_data = requests.get(url).content
         return self._upload_to_s3(img_data)
 
-    def edit_image(self, original_image_url: str, prompt: str, mask_url: str = None) -> str:
-        return super().edit_image(original_image_url, prompt, mask_url)
+    def edit_image(self, original_image_url: str, prompt: str, style_prompt: str = "", mask_url: str = None, context_images: list = None) -> str:
+        return super().edit_image(original_image_url, prompt, style_prompt, mask_url, context_images=context_images)
 
 class BedrockTitanAdapter(ImageModelAdapter):
     def __init__(self):
         self.client = boto3.client("bedrock-runtime", region_name=os.getenv("AWS_REGION"))
 
-    def generate_image(self, prompt: str, aspect_ratio: str = "1:1", init_image_path: str = None, context_images: list = None, **kwargs) -> str:
+    def generate_image(self, prompt: str, style_prompt: str = "", aspect_ratio: str = "1:1", init_image_path: str = None, context_images: list = None, **kwargs) -> str:
         import json
         import base64
         
@@ -153,8 +153,8 @@ class BedrockTitanAdapter(ImageModelAdapter):
         
         return self._upload_to_s3(image_bytes)
 
-    def edit_image(self, original_image_url: str, prompt: str, mask_url: str = None) -> str:
-        return super().edit_image(original_image_url, prompt, mask_url)
+    def edit_image(self, original_image_url: str, prompt: str, style_prompt: str = "", mask_url: str = None, context_images: list = None) -> str:
+        return super().edit_image(original_image_url, prompt, style_prompt, mask_url, context_images=context_images)
 
 class GoogleGeminiAdapter(ImageModelAdapter):
     def __init__(self):
@@ -257,10 +257,10 @@ class GoogleGeminiAdapter(ImageModelAdapter):
                             parsed = urlparse(s3_uri)
                             bucket_name = parsed.netloc
                             key = parsed.path.lstrip('/')
-                            s3 = boto3.client("s3")
                             with tempfile.NamedTemporaryFile(delete=False) as tmp:
-                                s3.download_fileobj(bucket_name, key, tmp)
                                 tmp_path = tmp.name
+                            s3 = boto3.client("s3")
+                            s3.download_file(bucket_name, key, tmp_path)
                             with open(tmp_path, 'rb') as f:
                                 img_bytes = f.read()
                             os.remove(tmp_path)

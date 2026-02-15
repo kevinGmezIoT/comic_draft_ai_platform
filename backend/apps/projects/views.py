@@ -216,7 +216,9 @@ class ProjectDetailView(APIView):
                         "image_url": panel.image_url,
                         "status": panel.status,
                         "balloons": panel.balloons,
-                        "layout": panel.layout
+                        "layout": panel.layout,
+                        "panel_style": panel.panel_style,
+                        "reference_image": panel.reference_image.url if panel.reference_image else None
                     })
                 
                 pages_data.append({
@@ -493,6 +495,7 @@ class RegeneratePanelView(APIView):
                 "action": "regenerate_panel",
                 "project_id": str(project.id),
                 "panel_id": panel.id,
+                "page_number": panel.page.page_number,
                 "prompt": panel.prompt,
                 "scene_description": panel.scene_description,
                 "balloons": panel.balloons,
@@ -676,3 +679,24 @@ class DeletePanelView(APIView):
             return Response({"status": "deleted and reordered"}, status=status.HTTP_200_OK)
         except Panel.DoesNotExist:
             return Response({"error": "Panel not found"}, status=status.HTTP_404_NOT_FOUND)
+
+class PanelUploadReferenceImageView(APIView):
+    """Sube una imagen de referencia para un panel específico"""
+    def post(self, request, panel_id):
+        try:
+            panel = Panel.objects.get(id=panel_id)
+            image_file = request.FILES.get('image')
+            if not image_file:
+                return Response({"error": "No image provided"}, status=status.HTTP_400_BAD_REQUEST)
+            
+            panel.reference_image = image_file
+            panel.save()
+            
+            return Response({
+                "status": "success",
+                "reference_image_url": request.build_absolute_uri(panel.reference_image.url)
+            }, status=status.HTTP_200_OK)
+        except Panel.DoesNotExist:
+            return Response({"error": "Panel not found"}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

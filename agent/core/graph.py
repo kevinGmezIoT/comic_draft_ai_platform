@@ -38,6 +38,8 @@ class AgentState(TypedDict):
     current_step: str
     action: str = "generate" # "generate" | "regenerate_panel"
     panel_id: str = None
+    current_image_url: str = None # Context for I2I
+    reference_image_url: str = None # Visual reference context
     continuity_state: Dict[str, Dict] # State tracking for Agent H
     reference_images: List[str]
     global_context: Dict # Optional metadata from backend
@@ -58,23 +60,55 @@ class PromptBuilder:
         
         # Layer 1.5: Instruction Integration
         instructions = panel.get("instructions")
-        instr_part = f"ADITONAL INSTRUCTIONS: {instructions}\n" if instructions else ""
+        instr_part = f"ADDITIONAL INSTRUCTIONS: {instructions}\n" if instructions else ""
 
         # Layer 2: Characters (Canonical Traits + Continuity)
         char_parts = []
         char_names = panel.get("characters", [])
+        
+        # Continuity data for characters and environment
+        characters_continuity = continuity_state.get("characters", {})
+        environment_continuity = continuity_state.get("environment", {})
+        
         for char_name in char_names:
             base_char = self.cm.get_character_prompt_segment(char_name)
             # Add continuity state (Agent H)
-            char_state = continuity_state.get(char_name, {})
+            # Try both the specific name and a case-insensitive match
+            char_state = characters_continuity.get(char_name)
+            if not char_state:
+                # Fallback: look for case-insensitive match
+                for name_key, state in characters_continuity.items():
+                    if name_key.lower() == char_name.lower():
+                        char_state = state
+                        break
+            
             state_str = ""
-            if char_state:
-                state_items = [f"{k}: {v}" for k, v in char_state.items()]
-                state_str = f" Estado actual: {', '.join(state_items)}."
+            if char_state and isinstance(char_state, dict):
+                state_items = [f"{k}: {v}" for k, v in char_state.items() if v]
+                if state_items:
+                    state_str = f" [Continuidad: {', '.join(state_items)}]"
             char_parts.append(f"{base_char}{state_str}")
             
         # Layer 3: Scene Action & Setting (Base)
+        base_scenery = panel.get('scenery', 'Basado en la escena')
+        env_str = ""
+        if environment_continuity:
+            # Flatten environmental details if they are nested
+            def flatten_env(d, prefix=""):
+                items = []
+                for k, v in d.items():
+                    if isinstance(v, dict):
+                        items.extend(flatten_env(v, f"{k} "))
+                    else:
+                        items.append(f"{prefix}{k}: {v}")
+                return items
+            
+            env_details = flatten_env(environment_continuity)
+            if env_details:
+                env_str = f" (Detalles de continuidad del entorno: {', '.join(env_details)})"
+        
         scene_desc = panel.get('scene_description', 'Cinematic comic scene')
+        final_scenery = f"{base_scenery}{env_str}"
         
         # Layer 4: Composition & Reasoning (Agent F Art Direction)
         layout = panel.get("layout", {"w": 50, "h": 50})
@@ -96,11 +130,11 @@ class PromptBuilder:
             INSTRUCCIONES DE CAMBIO: {instructions}
             
             NUEVO ESTILO: {style_part}
-            ESCENARIO: {panel.get('scenery', 'Basado en la escena')}
+            ESCENARIO: {final_scenery}
             PERSONAJES: {", ".join(char_names) if len(char_names) > 0 else "Sin personaje"}
             CONTEXTO MUNDO: {world_summary[:300]}
             DISEÑO: {w}%x{h}% ({aspect_ratio}).
-            RASGOS: {" ".join(char_parts)}
+            RASGOS Y CONTINUIDAD: {" ".join(char_parts)}
             
             Genera un PROMPT VISUAL FINAL que describa el resultado deseado combinando la descripción original con los cambios solicitados.
             Sé específico sobre qué elementos cambian (ej: "Ahora la ventana está iluminada...") y qué elementos se mantienen.
@@ -111,12 +145,12 @@ class PromptBuilder:
             reasoning_prompt = f"""
             Actúa como un Director de Fotografía de Cómics (Agent F: Prompt Builder).
             ESCENA: {scene_desc}
-            ESCENARIO: {panel.get('scenery', 'Basado en la descripción de la escena')}
+            ESCENARIO: {final_scenery}
             PERSONAJES: {", ".join(char_names) if len(char_names) > 0 else "Sin personaje"}
             CONTEXTO MUNDO: {world_summary[:300]}
             ESTILO BASE: {style_part}
             DISEÑO PANEL: {w}% de ancho x {h}% de alto ({aspect_ratio}).
-            RASGOS CANÓNICOS: {" ".join(char_parts) if len(char_parts) > 0 else "Sin personaje"}
+            RASGOS CANÓNICOS Y CONTINUIDAD: {" ".join(char_parts) if len(char_parts) > 0 else "Sin personaje"}
             
             Genera un PROMPT VISUAL FINAL para Stable Diffusion / DALL-E.
             Mejora la composición, iluminación y ángulo de cámara para este layout.
@@ -141,19 +175,53 @@ class ContinuitySupervisor:
         llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
         
         prompt = f"""
-        Actualiza el estado de continuidad basándote en la acción del panel.
-        ESTADO ANTERIOR: {json.dumps(current_state)}
-        ACCIÓN DEL PANEL: {panel['scene_description']}
-        PERSONAJES: {", ".join(panel.get('characters', []))}
+        Actualiza el estado de continuidad del cómic basándote en la acción de la nueva viñeta.
         
-        Identifica cambios en: ropa, heridas, objetos en mano, o ubicación.
-        Responde en JSON con el nuevo estado consolidado.
+        ESTADO ACTUAL (JSON):
+        {json.dumps(current_state, indent=2)}
+        
+        NUEVA ACCIÓN:
+        {panel['scene_description']}
+        
+        PERSONAJES PRESENTES: {", ".join(panel.get('characters', []))}
+        
+        Instrucciones:
+        1. Identifica cambios en: ropa, heridas, objetos en mano, ubicación o estado del entorno.
+        2. Mantén la consistencia con el estado anterior si no hay cambios.
+        3. Responde ÚNICAMENTE con un JSON que tenga esta estructura exacta:
+        {{
+            "characters": {{
+                "NombrePersonaje": {{ "ropa": "...", "heridas": "...", "objetos": "...", "ubicacion": "..." }}
+            }},
+            "environment": {{
+                "iluminacion": "...", "detalles": "...", "estado_objetos": "..."
+            }}
+        }}
+
+        Usa llaves en inglés para el JSON ("characters", "environment") pero puedes usar español para los valores.
         """
         try:
             res = llm.invoke(prompt)
-            new_state = json.loads(res.content.replace("```json", "").replace("```", ""))
+            content = res.content.strip()
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0].strip()
+            elif "```" in content:
+                content = content.split("```")[1].split("```")[0].strip()
+                
+            new_state = json.loads(content)
+            
+            # Normalización mínima de claves si el LLM usó español por error en las raíces
+            if "personajes" in new_state and "characters" not in new_state:
+                new_state["characters"] = new_state.pop("personajes")
+            if "habitacion" in new_state and "environment" not in new_state:
+                new_state["environment"] = new_state.pop("habitacion")
+            if "estado" in new_state and len(new_state) == 1:
+                # Si envolvió todo en "estado", lo sacamos
+                return self.update_state(current_state, panel) # Re-intento simple o desempaquetado
+            
             return new_state
-        except:
+        except Exception as e:
+            print(f"Error updating continuity state: {e}")
             return current_state
 
 def ingest_and_rag(state: AgentState):
@@ -198,7 +266,24 @@ def ingest_and_rag(state: AgentState):
     
     # Normalizar estilo (Agent B)
     sm = StyleManager(state["project_id"])
-    sm.normalize_style(summary)
+    
+    # Decidir qué usar para normalizar el estilo
+    # Prioridad: 1. style_guide directa, 2. world_bible, 3. fragmento de summary (solo si es necesario)
+    style_input = global_ctx.get("style_guide") or global_ctx.get("world_bible")
+    
+    # Solo normalizar si hay una guía explícita o si el estilo actual es el por defecto
+    current_style = sm.get_style_prompt()
+    is_default = "Professional comic book" in current_style
+    
+    if style_input:
+        print(f"DEBUG: [Agent B] Normalizing style using explicit guide. Input length: {len(style_input)}")
+        sm.normalize_style(style_input)
+    elif is_default and summary:
+        # Si no hay guía pero hay resumen, intentamos extraer estilo del inicio del resumen (reglas base)
+        print("DEBUG: [Agent B] Normalizing style using world summary excerpt.")
+        sm.normalize_style(summary[:1000])
+    else:
+        print("DEBUG: [Agent B] Skipping style normalization (already set or no input available).")
     
     return {
         "current_step": "world_model_builder", 
@@ -458,7 +543,9 @@ def image_generator(state: AgentState):
                 updated_panels.append(panel)
                 continue
 
-        if panel.get("image_url") and panel.get("status") not in ["pending", "editing"]:
+        is_target = state.get("action") == "regenerate_panel" and str(panel.get("id")) == target_panel_id
+        
+        if panel.get("image_url") and panel.get("status") not in ["pending", "editing"] and not is_target:
             updated_panels.append(panel)
             continue
 
@@ -468,6 +555,16 @@ def image_generator(state: AgentState):
         # Agent F: Build Layered Prompt
         augmented_prompt = pb.build_panel_prompt(panel, state["world_model_summary"], continuity)
         
+        # Image-to-Image support if current_image_url is provided
+        current_img = None
+        if is_target:
+            # If we are regenerating a specific panel, we MUST respect the I2I flag from the backend
+            # (current_image_url). If it's None, it means the user unchecked I2I.
+            current_img = state.get("current_image_url")
+        else:
+            # For massive generation, fallback to what's in the panel dict if present
+            current_img = panel.get("current_image_url") or panel.get("image_url")
+            
         # Coleccionar imágenes de contexto (Personajes del panel + Imagen de Referencia)
         context_images = []
         for char_name in panel.get("characters", []):
@@ -475,8 +572,14 @@ def image_generator(state: AgentState):
             if char_refs:
                 context_images.extend(char_refs)
         
-        # Add reference image from Panel context if available
-        ref_img = panel.get("reference_image_url")
+        # Add reference image context
+        # Prioritize top-level reference_image_url for the target panel
+        ref_img = None
+        if is_target:
+            ref_img = state.get("reference_image_url")
+        if not ref_img:
+            ref_img = panel.get("reference_image_url")
+            
         if ref_img:
             context_images.append(ref_img)
         
@@ -495,13 +598,18 @@ def image_generator(state: AgentState):
         if w / h > 1.2: aspect_ratio = "16:9"
         elif h / w > 1.2: aspect_ratio = "9:16"
 
-        # Image-to-Image support if current_image_url is provided or fallback to existing image_url
-        init_image = panel.get("current_image_url") or panel.get("image_url")
+        # Definir la imagen inicial para el adapter
+        init_image = current_img 
+        if not is_target:
+            # Solo aplicamos fallbacks si NO es una regeneración manual (donde el usuario decide el I2I)
+            if not init_image and panel.get("status") == "editing" and panel.get("image_url"):
+                init_image = panel.get("image_url")
 
-        if panel.get("status") == "editing" and init_image:
+        if init_image:
             # Usamos edit_image para que el adapter gestione la descarga de la URL antes de procesar
-            print(f"DEBUG: Editing panel {panel['id']} using init_image: {init_image}")
-            url = adapter.edit_image(original_image_url=init_image, prompt=augmented_prompt, style_prompt=panel.get('panel_style'))
+            # Pasamos unique_context para que Gemini (u otros) usen personajes/referencias incluso en I2I
+            print(f"DEBUG: I2I/Editing panel {panel['id']} using init_image: {init_image}")
+            url = adapter.edit_image(original_image_url=init_image, prompt=augmented_prompt, style_prompt=panel.get('panel_style'), context_images=unique_context)
         else:
             url = adapter.generate_panel(augmented_prompt, style_prompt=panel.get('panel_style'), aspect_ratio=aspect_ratio, context_images=unique_context)
             

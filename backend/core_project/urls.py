@@ -3,7 +3,7 @@ from django.urls import path
 from apps.projects.views import (
     GenerateComicView, AgentCallbackView, ProjectDetailView, 
     UpdatePanelView, RegeneratePanelView, RegenerateMergedPagesView,
-    CreateProjectView, ProjectUpdateView,
+    CreateProjectView, ProjectUpdateView, PanelUploadReferenceImageView,
     CharacterListView, CharacterCreateView, CharacterDetailView,
     SceneryListView, SceneryCreateView, SceneryDetailView,
     ProjectNoteView, ProjectNoteDetailView, PanelLayoutUpdateView,
@@ -28,6 +28,7 @@ urlpatterns = [
     path('api/projects/notes/<uuid:note_id>/', ProjectNoteDetailView.as_view()),
     path('api/panels/<int:panel_id>/update-layout/', PanelLayoutUpdateView.as_view()),
     path('api/panels/<int:panel_id>/update/', UpdatePanelView.as_view()),
+    path('api/panels/<int:panel_id>/upload-reference/', PanelUploadReferenceImageView.as_view()),
     path('api/panels/<int:panel_id>/regenerate/', RegeneratePanelView.as_view()),
     path('api/panels/<int:panel_id>/', DeletePanelView.as_view()),
 ]
