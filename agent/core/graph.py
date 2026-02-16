@@ -128,13 +128,13 @@ class PromptBuilder:
         is_edit = panel.get("status") == "editing"
         old_prompt = panel.get("prompt", "")
 
-        char_parts_str = "\n".join(char_parts) if len(char_parts) > 0 else "N/A"
+        char_parts_str = "\n".join(char_parts) if len(char_parts) > 0 else "No hay personajes principales en escena"
         
         if is_edit and instructions:
             reasoning_prompt = f"""
             Actúa como un Director de Arte de Cómics. Estás EDITANDO una viñeta existente.
             
-            DESCRIPCIÓN VISUAL ANTERIOR: {old_prompt}
+            DESCRIPCIÓN VISUAL ORIGINAL:\n {old_prompt}
             INSTRUCCIONES DE CAMBIO: {instructions}
             
             DISEÑO: {w}%x{h}% ({aspect_ratio}).
@@ -481,12 +481,19 @@ def story_understanding(state: AgentState):
             for pg in batch_page_nums:
                 page_summaries[pg] = raw_pages[pg][:500] + "..." if len(raw_pages[pg]) > 500 else raw_pages[pg]
     
-    print(f"DEBUG: [StoryUnderstanding] ✓ Complete. {len(page_summaries)} page summaries, {len(panel_purposes)} panel purposes extracted.")
+    # Reconstruir full_script en orden correcto de páginas para que el planner lo reciba ordenado
+    # (el full_script original viene de RAG similarity_search que no respeta orden de páginas)
+    ordered_full_script = ""
+    for pg in sorted(raw_pages.keys()):
+        ordered_full_script += f"\n\n=== PÁGINA {pg} ===\n{raw_pages[pg]}"
+    
+    print(f"DEBUG: [StoryUnderstanding] ✓ Complete. {len(page_summaries)} page summaries, {len(panel_purposes)} panel purposes extracted. full_script reordered ({len(ordered_full_script)} chars).")
     
     return {
         "current_step": "world_model_builder",
         "page_summaries": page_summaries,
-        "panel_purposes": panel_purposes
+        "panel_purposes": panel_purposes,
+        "full_script": ordered_full_script.strip()
     }
 
 def world_model_builder(state: AgentState):
@@ -500,23 +507,23 @@ def world_model_builder(state: AgentState):
     backend_chars = state.get("global_context", {}).get("characters", [])
     backend_scenes = state.get("global_context", {}).get("sceneries", [])
     
-    known_character_images = {c["name"].lower(): [c["image_url"]] for c in backend_chars if c.get("image_url")}
-    known_scenery_images = {s["name"].lower(): [s["image_url"]] for s in backend_scenes if s.get("image_url")}
+    known_character_images = {c["name"].lower(): c.get("image_urls", [c["image_url"]] if c.get("image_url") else []) for c in backend_chars}
+    known_scenery_images = {s["name"].lower(): s.get("image_urls", [s["image_url"]] if s.get("image_url") else []) for s in backend_scenes}
     
     # 1. Registrar OBLIGATORIAMENTE los personajes y escenarios del wizard (backend)
     for b_char in backend_chars:
         name = b_char["name"]
         description = b_char.get("description", "")
-        img_url = b_char.get("image_url")
-        cm.register_character(name, description, [img_url] if img_url else [])
-        print(f"DEBUG: [Wizard Asset] Character '{name}' registered from backend.")
+        img_urls = b_char.get("image_urls", [b_char["image_url"]] if b_char.get("image_url") else [])
+        cm.register_character(name, description, img_urls)
+        print(f"DEBUG: [Wizard Asset] Character '{name}' registered from backend with {len(img_urls)} images.")
 
     for b_scene in backend_scenes:
         name = b_scene["name"]
         description = b_scene.get("description", "")
-        img_url = b_scene.get("image_url")
-        scm.register_scenery(name, description, [img_url] if img_url else [])
-        print(f"DEBUG: [Wizard Asset] Scenery '{name}' registered from backend.")
+        img_urls = b_scene.get("image_urls", [b_scene["image_url"]] if b_scene.get("image_url") else [])
+        scm.register_scenery(name, description, img_urls)
+        print(f"DEBUG: [Wizard Asset] Scenery '{name}' registered from backend with {len(img_urls)} images.")
 
     # Recargar listas actualizadas del canon para el prompt
     existing_chars = list(cm.canon.data.get("characters", {}).keys())
@@ -572,8 +579,9 @@ def world_model_builder(state: AgentState):
             # Intentar mapear imágenes del backend
             for b_name, b_urls in known_character_images.items():
                 if target_name.lower() in b_name or b_name in target_name.lower():
-                    if b_urls[0] not in images:
-                        images.append(b_urls[0])
+                    for url in b_urls:
+                        if url and url not in images:
+                            images.append(url)
                     break
             
             # Buscar en archivos de referencia si aún no hay imágenes
@@ -604,9 +612,10 @@ def world_model_builder(state: AgentState):
             # 1. Match con backend
             for b_name, b_urls in known_scenery_images.items():
                 if target_name.lower() in b_name or b_name in target_name.lower():
-                    if b_urls[0] not in images:
-                        images.append(b_urls[0])
-                    print(f"DEBUG: Scenery '{target_name}' matched with backend scenery '{b_name}'")
+                    for url in b_urls:
+                        if url and url not in images:
+                            images.append(url)
+                    print(f"DEBUG: Scenery '{target_name}' matched with backend scenery '{b_name}' ({len(b_urls)} images)")
                     break
             
             # 2. Match con archivos por nombre
@@ -640,10 +649,6 @@ def planner(state: AgentState):
         preserved_panels = [p for p in existing_panels if p.get("page_number") != target_page]
         print(f"DEBUG: [SCOPED PLANNING] Preserving {len(preserved_panels)} panels from other pages. Target Page: {target_page}")
 
-    if target_page:
-        preserved_panels = [p for p in existing_panels if p.get("page_number") != target_page]
-        print(f"DEBUG: [SCOPED PLANNING] Preserving {len(preserved_panels)} panels. Target Page: {target_page}")
-
     # Calcular estructura de páginas basada en los paneles existentes (si los hay)
     page_structure = {}
     if existing_panels:
@@ -657,7 +662,7 @@ def planner(state: AgentState):
         parts = [f"Página {k}: {v} paneles" for k, v in sorted(page_structure.items())]
         structure_str = f"ESTRUCTURA DE LIENZO ACTUAL (REQUERIDA): {', '.join(parts)}."
     
-    print("--- STRATEGIC PLANNING ---")
+    print("--- STRATEGIC PLANNING (Batched) ---")
     canon = CanonicalStore(state["project_id"])
     cm = CharacterManager(state["project_id"], canon=canon)
     scm = SceneryManager(state["project_id"], canon=canon)
@@ -677,99 +682,188 @@ def planner(state: AgentState):
 
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
     
-    prompt = f"""
-    Basándote en el siguiente SUMMARY del mundo y SCRIPT:
-    
-    {assets_context}
-    
-    SUMMARY:
-    {state['world_model_summary']}
-    
-    SCRIPT (Separado en páginas y descriciones de viñetas de cada página):
-    {state['full_script']}
-    
-    TAMAÑO DE PÁGINA RECOMENDADO: {state.get('canvas_dimensions', '800x1100 (A4)')}
-    ESTILO DE LAYOUT: {state.get('layout_style', 'dynamic')}
-    {structure_str}
+    if not state.get('full_script') or len(state['full_script'].strip()) < 5:
+        raise ValueError("DEBUG ERROR: El script está vacío o es demasiado corto para planificar.")
 
-    {'ESTÁS REGENERANDO ÚNICAMENTE LA PÁGINA ' + str(target_page) if target_page else 'ESTÁS GENERANDO EL CÓMIC COMPLETO'}
+    # ── Build page-level script chunks for batched planning ──
+    # Use raw full_script split into pages (preserves granular viñeta details)
+    # page_summaries from story_understanding are added as supplementary narrative context
+    page_summaries = state.get("page_summaries", {})
+    full_script = state.get("full_script", "")
     
-    ORDEN DE PRIORIDAD:
-    - **DISTRIBUCIÓN ESTRICTA**: { 'Sigue exactamente la ESTRUCTURA DE LIENZO ACTUAL indicada arriba.' if structure_str else 'Reparte los ' + str(state.get('max_panels', 'paneles')) + ' entre las ' + str(state.get('max_pages', 3)) + ' páginas.' }
-    - **ÍNDICE DE ORDEN (CRÍTICO)**: El campo `order_in_page` DEBE EMPEZAR EN 0 para el primer panel de cada página. (Ej: 0, 1, 2...). No empieces en 1.
-    - Si el número total de paneles es {state.get('max_panels', 0)} y tienes {state.get('max_pages', 3)} páginas, asegúrate de que el campo `page_number` avance lógicamente.
-    - **CONTINUIDAD**: Si estás generando el cómic completo, el primer panel de la Página 2 debe ser la continuación inmediata del último panel de la Página 1.
+    script_pages: dict = {}  # page_num -> raw text
     
-    FORMATO JSON OBLIGATORIO:
-    {{
-        "panels": [
-            {{
-                "page_number": 1,
-                "order_in_page": 0,
-                "scene_description": "Descripción detallada de la escena...",
-                "script": "parte del guión que describe el panel o viñeta",
-                "characters": ["Nombre del Personaje"],
-                "scenery": "Lugar donde se desarrolla este panel o viñeta",
-                "style": "Estilo de dibujo"
-            }}
-        ]
-    }}
+    # Split raw script into page-sized chunks (keeps panel/viñeta granularity)
+    CHARS_PER_PAGE = 3000
+    for i in range(0, len(full_script), CHARS_PER_PAGE):
+        page_num = (i // CHARS_PER_PAGE) + 1
+        script_pages[page_num] = full_script[i:i + CHARS_PER_PAGE]
+    print(f"DEBUG: [PLANNER] Split full_script into {len(script_pages)} page chunks for planning.")
     
-    Responde ÚNICAMENTE con un JSON válido. No incluyas texto fuera del bloque de código JSON.
-    """
+    # ── Determine batching strategy ──
+    max_pages_comic = state.get("max_pages", 3)
+    max_panels_comic = state.get("max_panels", 0)
+    sorted_script_pages = sorted(script_pages.keys())
     
-    try:
-        if not state.get('full_script') or len(state['full_script'].strip()) < 5:
-            raise ValueError("DEBUG ERROR: El script está vacío o es demasiado corto para planificar.")
+    # Calculate panels per comic page for distribution guidance
+    panels_per_page = max(1, max_panels_comic // max_pages_comic) if max_panels_comic and max_pages_comic else 3
+    
+    # If the script is short enough (≤10 pages), process in a single call for better coherence
+    BATCH_SIZE = 10
+    use_batching = len(sorted_script_pages) > BATCH_SIZE
+    
+    if use_batching:
+        print(f"DEBUG: [PLANNER] Large script detected ({len(sorted_script_pages)} pages). Using batched planning.")
+    else:
+        print(f"DEBUG: [PLANNER] Script fits in single call ({len(sorted_script_pages)} pages).")
+    
+    # Build supplementary narrative context from page_summaries (if available)
+    def get_narrative_context_for_pages(page_nums: list) -> str:
+        """Get narrative summaries as supplementary context for a set of script pages."""
+        if not page_summaries:
+            return ""
+        context_parts = []
+        for pg in page_nums:
+            summary = page_summaries.get(pg, page_summaries.get(str(pg), ""))
+            if summary:
+                context_parts.append(f"Pág {pg}: {summary}")
+        if context_parts:
+            return "CONTEXTO NARRATIVO (resumen de las páginas del guión):\n" + "\n".join(context_parts)
+        return ""
+    
+    # ── Helper: invoke LLM for a batch of script pages ──
+    def plan_batch(batch_script_text: str, narrative_context: str, comic_page_start: int, comic_page_end: int, 
+                   panels_for_batch: int, previous_panel_context: str) -> list:
+        """Generate panels for a subset of comic pages from a batch of script text."""
+        
+        batch_prompt = f"""
+        Basándote en el siguiente SUMMARY del mundo y SCRIPT:
+        
+        {assets_context}
+        
+        SUMMARY:
+        {state['world_model_summary'][:1500]}
+        
+        {narrative_context}
+        
+        SCRIPT (Guión completo con descripción detallada de cada viñeta):
+        {batch_script_text}
+        
+        TAMAÑO DE PÁGINA RECOMENDADO: {state.get('canvas_dimensions', '800x1100 (A4)')}
+        ESTILO DE LAYOUT: {state.get('layout_style', 'dynamic')}
+        {structure_str}
 
+        {'ESTÁS REGENERANDO ÚNICAMENTE LA PÁGINA ' + str(target_page) if target_page else f'ESTÁS GENERANDO LAS PÁGINAS {comic_page_start} A {comic_page_end} DEL CÓMIC'}
+        
+        {f'CONTEXTO DEL PANEL ANTERIOR (para mantener continuidad): {previous_panel_context}' if previous_panel_context else ''}
+        
+        ORDEN DE PRIORIDAD:
+        - **DISTRIBUCIÓN**: Genera aproximadamente {panels_for_batch} paneles repartidos entre las páginas {comic_page_start} a {comic_page_end}.
+        - **ÍNDICE DE ORDEN (CRÍTICO)**: El campo `order_in_page` DEBE EMPEZAR EN 0 para el primer panel de cada página. (Ej: 0, 1, 2...). No empieces en 1.
+        - Los `page_number` DEBEN ir de {comic_page_start} a {comic_page_end}.
+        - **CONTINUIDAD**: El primer panel debe ser la continuación inmediata del contexto anterior (si existe).
+        
+        FORMATO JSON OBLIGATORIO:
+        {{
+            "panels": [
+                {{
+                    "page_number": {comic_page_start},
+                    "order_in_page": 0,
+                    "scene_description": "Descripción detallada de la escena...",
+                    "script": "parte del guión que describe detalladamente el panel o viñeta, no solo el diálogo sino la descripción completa de la escena.",
+                    "characters": ["Nombre del Personaje"],
+                    "scenery": "Lugar donde se desarrolla este panel o viñeta",
+                    "style": "Estilo de dibujo"
+                }}
+            ]
+        }}
+        
+        Responde ÚNICAMENTE con un JSON válido. No incluyas texto fuera del bloque de código JSON.
+        """
+        
         response = llm.invoke([
             SystemMessage(content="Eres un director de arte de cómics experto en descomposición de guiones. Responde SIEMPRE con un JSON válido."),
-            HumanMessage(content=prompt)
+            HumanMessage(content=batch_prompt)
         ])
         
         content = response.content.strip()
-        print(f"DEBUG: LLM Planner Output: {content[:200]}...")
+        print(f"DEBUG: [PLANNER BATCH] Pages {comic_page_start}-{comic_page_end} Output: {content[:200]}...")
 
         if content.startswith("```json"):
             content = content[7:-3].strip()
+        elif "```json" in content:
+            content = content.split("```json")[1].split("```")[0].strip()
         
-        data = json.loads(content)
+        return json.loads(content)
+    
+    # ── Execute planning (single or batched) ──
+    all_panels = []
+    
+    try:
+        if not use_batching:
+            # Single call for short scripts
+            batch_text = ""
+            for pg in sorted_script_pages:
+                batch_text += f"\n\n=== PÁGINA {pg} DEL GUIÓN ===\n{script_pages[pg]}"
+            
+            comic_page_start = target_page if target_page else 1
+            comic_page_end = target_page if target_page else max_pages_comic
+            
+            narrative_ctx = get_narrative_context_for_pages(sorted_script_pages)
+            
+            data = plan_batch(
+                batch_text, narrative_ctx, comic_page_start, comic_page_end,
+                max_panels_comic if max_panels_comic else panels_per_page * max_pages_comic,
+                ""
+            )
+            all_panels = _extract_panels_from_data(data)
+        else:
+            # Batched processing: map script page batches -> comic page ranges
+            previous_context = ""
+            
+            # Calculate how many comic pages each script batch maps to
+            script_to_comic_ratio = max_pages_comic / len(sorted_script_pages) if sorted_script_pages else 1
+            
+            for batch_idx in range(0, len(sorted_script_pages), BATCH_SIZE):
+                batch_page_nums = sorted_script_pages[batch_idx:batch_idx + BATCH_SIZE]
+                batch_text = ""
+                for pg in batch_page_nums:
+                    batch_text += f"\n\n=== PÁGINA {pg} DEL GUIÓN ===\n{script_pages[pg]}"
+                
+                # Map this batch of script pages to comic page range
+                comic_page_start = int(batch_idx * script_to_comic_ratio) + 1
+                comic_page_end = min(int((batch_idx + len(batch_page_nums)) * script_to_comic_ratio) + 1, max_pages_comic)
+                # Ensure at least 1 page per batch
+                if comic_page_end < comic_page_start:
+                    comic_page_end = comic_page_start
+                
+                batch_panels_count = panels_per_page * (comic_page_end - comic_page_start + 1)
+                
+                print(f"DEBUG: [PLANNER BATCH] Script pages {batch_page_nums[0]}-{batch_page_nums[-1]} -> Comic pages {comic_page_start}-{comic_page_end} ({batch_panels_count} panels)")
+                
+                narrative_ctx = get_narrative_context_for_pages(batch_page_nums)
+                data = plan_batch(batch_text, narrative_ctx, comic_page_start, comic_page_end, batch_panels_count, previous_context)
+                batch_panels = _extract_panels_from_data(data)
+                
+                if batch_panels:
+                    # Save last panel as context for next batch
+                    last = batch_panels[-1]
+                    previous_context = f"Página {last.get('page_number')}, Escena: {last.get('scene_description', '')[:200]}, Personajes: {', '.join(last.get('characters', []))}"
+                    all_panels.extend(batch_panels)
+                    print(f"DEBUG: [PLANNER BATCH] Got {len(batch_panels)} panels. Total so far: {len(all_panels)}")
         
-        def find_all_panels(obj):
-            found = []
-            keys_to_match = ["scene_description", "prompt", "descripcion", "guion", "escena", "accion", "texto", "description", "panel_description"]
-            if isinstance(obj, list):
-                for item in obj:
-                    if isinstance(item, dict) and any(k in item for k in keys_to_match):
-                        found.append(item)
-                    else:
-                        found.extend(find_all_panels(item))
-            elif isinstance(obj, dict):
-                if any(k in obj for k in keys_to_match):
-                    found.append(obj)
-                else:
-                    for value in obj.values():
-                        found.extend(find_all_panels(value))
-            return found
+        if not all_panels:
+            raise ValueError("No panels were generated by the LLM from the script.")
 
-        panels = find_all_panels(data)
-        if not panels:
-            if isinstance(data, list):
-                panels = data
-        
-        if not panels:
-             raise ValueError("No panels were generated by the LLM from the script.")
-
+        # ── Post-process: normalize IDs, page numbers, layouts ──
         page_counts = {}
-        # Crear un mapa de layouts existentes para preservación (heurística de posición)
         existing_layout_map = {
             (p.get("page_number"), p.get("order_in_page")): p.get("layout") 
             for p in existing_panels 
             if p.get("layout") and p.get("layout").get("w", 0) > 0
         }
 
-        for i, p in enumerate(panels):
-            # Standardize ID as string to avoid type mismatch (int vs str)
+        for i, p in enumerate(all_panels):
             p_id = str(p.get("id")) if p.get("id") else f"p_{i}"
             p["id"] = p_id
             p.setdefault("image_url", "")
@@ -782,7 +876,6 @@ def planner(state: AgentState):
             p["order_in_page"] = p_order
             page_counts[p_num] = p_order + 1
 
-            # Intentar recuperar layout previo si coincide la posición
             prev_layout = existing_layout_map.get((p_num, p_order))
             if prev_layout:
                 print(f"DEBUG: [PLANNER] Inheriting Layout for Pág {p_num}, Orden {p_order} -> {prev_layout}")
@@ -793,13 +886,37 @@ def planner(state: AgentState):
             if not p.get("prompt"):
                 p["prompt"] = "Cinematic comic panel"
 
-        final_panels = preserved_panels + panels
+        final_panels = preserved_panels + all_panels
         return {"panels": final_panels, "current_step": "layout_designer"}
     except Exception as e:
         print(f"CRITICAL ERROR en planner: {e}")
         import traceback
         traceback.print_exc()
         raise e
+
+def _extract_panels_from_data(data) -> list:
+    """Helper: extract panel dicts from an LLM JSON response with flexible structure."""
+    def find_all_panels(obj):
+        found = []
+        keys_to_match = ["scene_description", "prompt", "descripcion", "guion", "escena", "accion", "texto", "description", "panel_description"]
+        if isinstance(obj, list):
+            for item in obj:
+                if isinstance(item, dict) and any(k in item for k in keys_to_match):
+                    found.append(item)
+                else:
+                    found.extend(find_all_panels(item))
+        elif isinstance(obj, dict):
+            if any(k in obj for k in keys_to_match):
+                found.append(obj)
+            else:
+                for value in obj.values():
+                    found.extend(find_all_panels(value))
+        return found
+    
+    panels = find_all_panels(data)
+    if not panels and isinstance(data, list):
+        panels = data
+    return panels
 
 def image_generator(state: AgentState):
     print("--- AGENT F & H: MULTIMODAL IMAGE GENERATION ---")
@@ -881,14 +998,6 @@ def image_generator(state: AgentState):
             
         if ref_img:
             context_images.append(ref_img)
-        
-        # If we are regenerating a target panel but NOT using I2I, 
-        # still add the current image as a REFERENCE for consistency
-        if is_target and not current_img:
-            existing_url = panel.get("image_url")
-            if existing_url and existing_url not in context_images:
-                print(f"DEBUG: Adding existing panel image as REFERENCE context (non-I2I): {existing_url}")
-                context_images.append(existing_url)
         
         # Eliminar duplicados manteniendo orden
         seen = set()
@@ -1123,7 +1232,7 @@ def page_merger(state: AgentState):
         if page_summary:
             print(f"DEBUG: [StoryUnderstanding -> Merger] Page {page_num} enriched with summary: {page_summary[:100]}...")
 
-        merge_prompt = f"ORGANIC COMIC PAGE MERGE. \nInstrucciones visuales: {visual_blend_description} {instr_part}{summary_part} \nPágina en el guión: {page_num}\nStyle: {state.get('world_model_summary', '')}. Professional comic art style."
+        merge_prompt = f"ORGANIC COMIC PAGE MERGE. \nInstrucciones visuales: {visual_blend_description} {instr_part}{summary_part} \nPágina en el guión: {page_num}\nStyle: {state.get('style_guide', '')}. Professional comic art style."
         
         # CONTINUIDAD: Agregar la página anterior como referencia visual si existe
         merge_context_images = []

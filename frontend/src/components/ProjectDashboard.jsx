@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import {
     Users, Map, FileText, Zap,
     ArrowRight, Edit3, Trash2, Plus, Layout,
-    Save, X, BookOpen, Palette, Info, Upload, Loader2
+    Save, X, BookOpen, Palette, Info, Upload, Loader2, Image as ImageIcon
 } from 'lucide-react';
 import axios from 'axios';
 
@@ -241,11 +241,21 @@ const ProjectDashboard = ({ projectId, onStartGeneration }) => {
                                             <button onClick={() => handleDelete('char', char.id)} className="text-gray-500 hover:text-red-400 p-2 bg-gray-900 rounded-lg"><Trash2 size={14} /></button>
                                         </div>
                                     </div>
+                                    {char.image_url && (
+                                        <div className="mb-3 rounded-xl overflow-hidden border border-gray-800 h-32">
+                                            <img src={char.image_url} alt={char.name} className="w-full h-full object-cover" />
+                                        </div>
+                                    )}
                                     <p className="text-sm text-gray-500 line-clamp-2 leading-relaxed">{char.description}</p>
                                     <div className="mt-4 flex items-center gap-2 text-xs text-blue-400/60 font-bold uppercase tracking-widest">
                                         {char.metadata?.file_name && (
                                             <span className="bg-blue-400/5 px-3 py-1 rounded-lg flex items-center gap-2 border border-blue-400/10">
                                                 <FileText size={12} /> {char.metadata.file_name}
+                                            </span>
+                                        )}
+                                        {char.reference_images?.length > 0 && (
+                                            <span className="bg-purple-400/5 px-3 py-1 rounded-lg flex items-center gap-2 border border-purple-400/10 text-purple-400/60">
+                                                <ImageIcon size={12} /> {char.reference_images.length + (char.image_url ? 1 : 0)} refs
                                             </span>
                                         )}
                                     </div>
@@ -278,7 +288,19 @@ const ProjectDashboard = ({ projectId, onStartGeneration }) => {
                                             <button onClick={() => handleDelete('scene', scene.id)} className="text-gray-500 hover:text-red-400 p-2 bg-gray-900 rounded-lg"><Trash2 size={14} /></button>
                                         </div>
                                     </div>
+                                    {scene.image_url && (
+                                        <div className="mb-3 rounded-xl overflow-hidden border border-gray-800 h-32">
+                                            <img src={scene.image_url} alt={scene.name} className="w-full h-full object-cover" />
+                                        </div>
+                                    )}
                                     <p className="text-sm text-gray-500 line-clamp-2 leading-relaxed">{scene.description}</p>
+                                    {scene.reference_images?.length > 0 && (
+                                        <div className="mt-4 flex items-center gap-2 text-xs text-green-400/60 font-bold uppercase tracking-widest">
+                                            <span className="bg-green-400/5 px-3 py-1 rounded-lg flex items-center gap-2 border border-green-400/10">
+                                                <ImageIcon size={12} /> {scene.reference_images.length + (scene.image_url ? 1 : 0)} refs
+                                            </span>
+                                        </div>
+                                    )}
                                 </div>
                             )) || <p className="text-gray-600 italic">No hay escenarios registrados.</p>}
                         </div>
@@ -499,6 +521,11 @@ const AssetForm = ({ type, initialData, onSubmit, onCancel }) => {
     const [name, setName] = useState(initialData?.name || initialData?.title || '');
     const [description, setDescription] = useState(initialData?.description || initialData?.content || '');
     const [file, setFile] = useState(null);
+    const [referenceFiles, setReferenceFiles] = useState([]);
+    const [existingRefs, setExistingRefs] = useState(initialData?.reference_images || []);
+    const [deleteRefIds, setDeleteRefIds] = useState([]);
+
+    const isAsset = type === 'char' || type === 'scene';
 
     const handleSubmit = (e) => {
         e.preventDefault();
@@ -507,6 +534,16 @@ const AssetForm = ({ type, initialData, onSubmit, onCancel }) => {
         data.append(type === 'note' ? 'content' : 'description', description);
         if (file) {
             data.append(type === 'note' ? 'file' : 'image', file);
+        }
+
+        // Append multiple reference images for characters/sceneries
+        if (isAsset && referenceFiles.length > 0) {
+            referenceFiles.forEach(f => data.append('reference_images', f));
+        }
+
+        // Append reference image deletions
+        if (isAsset && deleteRefIds.length > 0) {
+            data.append('delete_reference_ids', JSON.stringify(deleteRefIds));
         }
 
         // Create metadata: merge existing ones with new file info if present
@@ -534,6 +571,15 @@ const AssetForm = ({ type, initialData, onSubmit, onCancel }) => {
         onSubmit(data);
     };
 
+    const handleRemoveExistingRef = (refId) => {
+        setDeleteRefIds(prev => [...prev, refId]);
+        setExistingRefs(prev => prev.filter(r => r.id !== refId));
+    };
+
+    const handleRemoveNewFile = (index) => {
+        setReferenceFiles(prev => prev.filter((_, i) => i !== index));
+    };
+
     return (
         <form onSubmit={handleSubmit} className="space-y-6">
             <div>
@@ -554,7 +600,9 @@ const AssetForm = ({ type, initialData, onSubmit, onCancel }) => {
                 />
             </div>
             <div>
-                <label className="block text-xs font-bold text-gray-500 mb-2 uppercase tracking-widest">Archivo Adjunto (Opcional)</label>
+                <label className="block text-xs font-bold text-gray-500 mb-2 uppercase tracking-widest">
+                    {isAsset ? 'Imagen Principal (Opcional)' : 'Archivo Adjunto (Opcional)'}
+                </label>
                 <div className="relative">
                     <input
                         type="file"
@@ -567,6 +615,63 @@ const AssetForm = ({ type, initialData, onSubmit, onCancel }) => {
                     </div>
                 </div>
             </div>
+
+            {/* Multiple Reference Images - Only for characters/sceneries */}
+            {isAsset && (
+                <div>
+                    <label className="block text-xs font-bold text-gray-500 mb-2 uppercase tracking-widest">
+                        Imágenes de Referencia Adicionales
+                    </label>
+                    <p className="text-[10px] text-gray-600 mb-3">Sube múltiples imágenes para mejorar la consistencia visual del personaje/escenario.</p>
+
+                    {/* Existing reference images (edit mode) */}
+                    {existingRefs.length > 0 && (
+                        <div className="flex flex-wrap gap-2 mb-3">
+                            {existingRefs.map((ref) => (
+                                <div key={ref.id} className="relative group w-16 h-16 rounded-lg overflow-hidden border border-gray-700">
+                                    <img src={ref.image_url} alt="ref" className="w-full h-full object-cover" />
+                                    <button
+                                        type="button"
+                                        onClick={() => handleRemoveExistingRef(ref.id)}
+                                        className="absolute inset-0 bg-red-600/80 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                                    >
+                                        <X size={14} className="text-white" />
+                                    </button>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+
+                    {/* New reference file names */}
+                    {referenceFiles.length > 0 && (
+                        <div className="flex flex-wrap gap-2 mb-3">
+                            {referenceFiles.map((f, i) => (
+                                <span key={i} className="bg-purple-600/10 text-purple-300 text-xs px-3 py-1.5 rounded-lg flex items-center gap-2 border border-purple-500/20">
+                                    <ImageIcon size={10} /> {f.name}
+                                    <button type="button" onClick={() => handleRemoveNewFile(i)} className="text-purple-400 hover:text-red-400">
+                                        <X size={12} />
+                                    </button>
+                                </span>
+                            ))}
+                        </div>
+                    )}
+
+                    <div className="relative">
+                        <input
+                            type="file"
+                            multiple
+                            accept="image/*"
+                            className="absolute inset-0 opacity-0 cursor-pointer"
+                            onChange={e => setReferenceFiles(prev => [...prev, ...Array.from(e.target.files)])}
+                        />
+                        <div className="w-full bg-gray-800/50 border border-purple-500/20 border-dashed rounded-xl py-3 px-5 flex items-center justify-between text-purple-400/60 text-xs hover:border-purple-500/40 transition-colors">
+                            <span className="flex items-center gap-2"><Plus size={14} /> Añadir imágenes de referencia...</span>
+                            <ImageIcon size={16} />
+                        </div>
+                    </div>
+                </div>
+            )}
+
             <div className="flex gap-4 pt-4">
                 <button type="button" onClick={onCancel} className="flex-1 py-4 text-gray-500 font-bold hover:text-white transition-colors">Cancelar</button>
                 <button type="submit" className="flex-1 bg-purple-600 hover:bg-purple-500 text-white py-4 rounded-xl font-black shadow-lg shadow-purple-500/20 transition-all uppercase">

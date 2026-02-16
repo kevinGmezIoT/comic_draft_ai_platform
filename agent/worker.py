@@ -109,15 +109,24 @@ def regenerate_panel_logic(project_id, panel_id, prompt, scene_description, ball
             p['panel_style'] = kwargs.get('panel_style', p.get('panel_style'))
             p['instructions'] = kwargs.get('instructions', p.get('instructions'))
             
-            # Use provided current_image_url or fallback to existing image_url for I2I
-            provided_url = kwargs.get('current_image_url')
-            p['current_image_url'] = provided_url if provided_url else p.get('image_url')
+            # Use provided current_image_url for I2I. If None, the user unchecked I2I — do NOT fallback.
+            p['current_image_url'] = kwargs.get('current_image_url')
             
             p['reference_image_url'] = kwargs.get('reference_image_url', p.get('reference_image_url'))
         
         # Ensure characters field exists (mapping from character_refs if necessary)
         if 'characters' not in p:
             p['characters'] = p.get('character_refs', [])
+        
+        # Fallback: if characters is still empty, extract from balloons
+        if not p['characters']:
+            balloon_chars = list(set(
+                b.get('character') for b in p.get('balloons', []) 
+                if b.get('character')
+            ))
+            if balloon_chars:
+                p['characters'] = balloon_chars
+                print(f"DEBUG: Inferred characters from balloons for panel {p.get('id')}: {balloon_chars}")
             
         processed_panels.append(p)
 

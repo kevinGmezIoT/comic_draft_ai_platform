@@ -118,6 +118,49 @@ class Scenery(models.Model):
     def __str__(self):
         return f"{self.name} ({self.project.name})"
 
+def reference_image_upload_path(instance, filename):
+    """Upload path for reference images linked to characters or sceneries."""
+    if instance.character:
+        project_id = str(instance.character.project.id)
+        entity_type = "characters"
+        entity_id = str(instance.character.id)
+    elif instance.scenery:
+        project_id = str(instance.scenery.project.id)
+        entity_type = "sceneries"
+        entity_id = str(instance.scenery.id)
+    else:
+        project_id = "unknown"
+        entity_type = "refs"
+        entity_id = "unknown"
+    return f"projects/{project_id}/{entity_type}/{entity_id}/refs/{filename}"
+
+class ReferenceImage(models.Model):
+    """Stores additional reference images for Characters and Sceneries."""
+    character = models.ForeignKey(
+        Character, related_name='reference_images',
+        on_delete=models.CASCADE, null=True, blank=True
+    )
+    scenery = models.ForeignKey(
+        Scenery, related_name='reference_images',
+        on_delete=models.CASCADE, null=True, blank=True
+    )
+    image = models.ImageField(upload_to=reference_image_upload_path, max_length=2000)
+    order = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    @property
+    def image_url(self):
+        if self.image:
+            return self.image.url
+        return ""
+
+    def __str__(self):
+        owner = self.character or self.scenery
+        return f"Ref image for {owner} (order={self.order})"
+
+    class Meta:
+        ordering = ['order', 'created_at']
+
 class ProjectNote(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     project = models.ForeignKey(Project, related_name='notes', on_delete=models.CASCADE)

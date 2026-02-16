@@ -34,6 +34,7 @@ def process_agent_result(project_id, data):
         processed_panel_ids = []
         
         for p_data in panels_data:
+            print(f"DEBUG: [PROCESSOR] Panel {p_data.get('id')} characters: {p_data.get('characters', 'NOT_PRESENT')}")
             p_num = int(p_data.get('page_number', 1))
             if p_num not in pages_map:
                 page, created_page = Page.objects.get_or_create(project=project, page_number=p_num)
@@ -72,6 +73,7 @@ def process_agent_result(project_id, data):
                         "scene_description": p_data.get('scene_description', ''),
                         "balloons": p_data.get('balloons', []),
                         "layout": p_data.get('layout', {}),
+                        "character_refs": p_data.get('characters', []),
                         "status": "completed"
                     }
                 )
@@ -86,7 +88,8 @@ def process_agent_result(project_id, data):
                 # Otherwise, the agent context might overwrite valid user modifications on other panels.
                 is_target = True
                 if action == 'regenerate_panel':
-                    is_target = str(panel.id) == str(data.get('panel_id'))
+                    target_pid = data.get('panel_id') or result.get('panel_id')
+                    is_target = str(panel.id) == str(target_pid)
                 elif action == 'regenerate_merge':
                     is_target = False # Merges shouldn't touch panels
                 
@@ -125,13 +128,16 @@ def process_agent_result(project_id, data):
                 panel.layout = p_data.get('layout', panel.layout)
                 panel.status = "completed"
                 panel.order = p_data.get('order_in_page', panel.order)
+                # Persist character assignments from the planner so they survive regeneration
+                if p_data.get('characters'):
+                    panel.character_refs = p_data['characters']
                 panel.save()
             
             processed_panel_ids.append(panel.id)
             
             # Reconcile Image: Only update if it's a full generation OR if this is the target panel of a regeneration
             # This prevents mirroring back absolute URLs into the FileField name for unchanged panels
-            should_update_image = (action == 'generate' or action == 'NOT_FOUND') or (action == 'regenerate_panel' and str(panel.id) == str(data.get('panel_id')))
+            should_update_image = (action == 'generate' or action == 'NOT_FOUND') or (action == 'regenerate_panel' and str(panel.id) == str(data.get('panel_id') or result.get('panel_id')))
 
             if p_data.get('image_url') and should_update_image:
                 raw_url = p_data['image_url'].split('?')[0]

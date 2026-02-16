@@ -5,8 +5,26 @@ from .agent_utils import BedrockAgentClient
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, parsers
-from .models import Project, Page, Panel, Character, Scenery
+from .models import Project, Page, Panel, Character, Scenery, ReferenceImage
 from .result_processor import process_agent_result
+
+def _get_all_image_urls(entity):
+    """Returns a list of all image URLs for a Character or Scenery (primary + references)."""
+    urls = []
+    if entity.image:
+        urls.append(entity.image.name)
+    for ref in entity.reference_images.all():
+        if ref.image:
+            urls.append(ref.image.name)
+    return urls
+
+def _serialize_ref_images(entity):
+    """Returns the reference_images serialization for API responses."""
+    return [{
+        "id": ref.id,
+        "image_url": ref.image_url,
+        "order": ref.order
+    } for ref in entity.reference_images.all()]
 
 class GenerateComicView(APIView):
     def post(self, request, project_id):
@@ -155,13 +173,15 @@ class GenerateComicView(APIView):
                     "name": c.name,
                     "description": c.description,
                     "metadata": c.metadata,
-                    "image_url": c.image.name if c.image else ""
+                    "image_url": c.image.name if c.image else "",
+                    "image_urls": _get_all_image_urls(c)
                 } for c in project.characters.all()],
                 "sceneries": [{
                     "name": s.name,
                     "description": s.description,
                     "metadata": s.metadata,
-                    "image_url": s.image.name if s.image else ""
+                    "image_url": s.image.name if s.image else "",
+                    "image_urls": _get_all_image_urls(s)
                 } for s in project.sceneries.all()]
             }
         }
@@ -249,14 +269,16 @@ class ProjectDetailView(APIView):
                     "name": c.name,
                     "description": c.description,
                     "metadata": c.metadata,
-                    "image_url": c.image_url
+                    "image_url": c.image_url,
+                    "reference_images": _serialize_ref_images(c)
                 } for c in project.characters.all()],
                 "sceneries": [{
                     "id": s.id,
                     "name": s.name,
                     "description": s.description,
                     "metadata": s.metadata,
-                    "image_url": s.image_url
+                    "image_url": s.image_url,
+                    "reference_images": _serialize_ref_images(s)
                 } for s in project.sceneries.all()]
             })
         except Project.DoesNotExist:
@@ -319,7 +341,8 @@ class CharacterListView(APIView):
             "id": c.id,
             "name": c.name,
             "description": c.description,
-            "image_url": c.image_url
+            "image_url": c.image_url,
+            "reference_images": _serialize_ref_images(c)
         } for c in characters])
 
 class CharacterDetailView(APIView):
@@ -332,7 +355,8 @@ class CharacterDetailView(APIView):
                 "name": c.name,
                 "description": c.description,
                 "metadata": c.metadata,
-                "image_url": c.image_url
+                "image_url": c.image_url,
+                "reference_images": _serialize_ref_images(c)
             })
         except Character.DoesNotExist:
             return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
@@ -362,6 +386,27 @@ class CharacterDetailView(APIView):
                 c.image.name = request.data.get('image_url')
             
             c.save()
+
+            # Handle multiple reference images
+            ref_files = request.FILES.getlist('reference_images')
+            for i, ref_file in enumerate(ref_files):
+                ReferenceImage.objects.create(
+                    character=c,
+                    image=ref_file,
+                    order=c.reference_images.count()
+                )
+
+            # Handle deletion of specific reference images
+            import json
+            delete_ids = request.data.get('delete_reference_ids')
+            if delete_ids:
+                if isinstance(delete_ids, str):
+                    try:
+                        delete_ids = json.loads(delete_ids)
+                    except json.JSONDecodeError:
+                        delete_ids = []
+                ReferenceImage.objects.filter(id__in=delete_ids, character=c).delete()
+
             return Response({"status": "updated"})
         except Character.DoesNotExist:
             return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
@@ -405,6 +450,17 @@ class CharacterCreateView(APIView):
             character.save()
             if image_file:
                 print(f"DEBUG S3: Imagen de personaje subida. URL: {character.image.url}")
+
+            # Handle multiple reference images
+            ref_files = request.FILES.getlist('reference_images')
+            for i, ref_file in enumerate(ref_files):
+                ReferenceImage.objects.create(
+                    character=character,
+                    image=ref_file,
+                    order=i
+                )
+                print(f"DEBUG S3: Reference image {i+1} uploaded for character '{character.name}'")
+
             return Response({"id": character.id}, status=status.HTTP_201_CREATED)
         except Project.DoesNotExist:
             return Response({"error": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
@@ -416,7 +472,8 @@ class SceneryListView(APIView):
             "id": s.id,
             "name": s.name,
             "description": s.description,
-            "image_url": s.image_url
+            "image_url": s.image_url,
+            "reference_images": _serialize_ref_images(s)
         } for s in sceneries])
 
 class SceneryDetailView(APIView):
@@ -429,7 +486,8 @@ class SceneryDetailView(APIView):
                 "name": s.name,
                 "description": s.description,
                 "metadata": s.metadata,
-                "image_url": s.image_url
+                "image_url": s.image_url,
+                "reference_images": _serialize_ref_images(s)
             })
         except Scenery.DoesNotExist:
             return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
@@ -459,6 +517,27 @@ class SceneryDetailView(APIView):
                 s.image.name = request.data.get('image_url')
             
             s.save()
+
+            # Handle multiple reference images
+            ref_files = request.FILES.getlist('reference_images')
+            for i, ref_file in enumerate(ref_files):
+                ReferenceImage.objects.create(
+                    scenery=s,
+                    image=ref_file,
+                    order=s.reference_images.count()
+                )
+
+            # Handle deletion of specific reference images
+            import json
+            delete_ids = request.data.get('delete_reference_ids')
+            if delete_ids:
+                if isinstance(delete_ids, str):
+                    try:
+                        delete_ids = json.loads(delete_ids)
+                    except json.JSONDecodeError:
+                        delete_ids = []
+                ReferenceImage.objects.filter(id__in=delete_ids, scenery=s).delete()
+
             return Response({"status": "updated"})
         except Scenery.DoesNotExist:
             return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
@@ -502,6 +581,17 @@ class SceneryCreateView(APIView):
             scenery.save()
             if image_file:
                 print(f"DEBUG S3: Imagen de escenario subida. URL: {scenery.image.url}")
+
+            # Handle multiple reference images
+            ref_files = request.FILES.getlist('reference_images')
+            for i, ref_file in enumerate(ref_files):
+                ReferenceImage.objects.create(
+                    scenery=scenery,
+                    image=ref_file,
+                    order=i
+                )
+                print(f"DEBUG S3: Reference image {i+1} uploaded for scenery '{scenery.name}'")
+
             return Response({"id": scenery.id}, status=status.HTTP_201_CREATED)
         except Project.DoesNotExist:
             return Response({"error": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
@@ -574,13 +664,16 @@ class RegeneratePanelView(APIView):
                     "characters": [{
                         "name": c.name,
                         "description": c.description,
-                        "metadata": c.metadata
+                        "metadata": c.metadata,
+                        "image_url": c.image.name if c.image else "",
+                        "image_urls": _get_all_image_urls(c)
                     } for c in project.characters.all()],
                     "sceneries": [{
                         "name": s.name,
                         "description": s.description,
                         "metadata": s.metadata,
-                        "image_url": request.build_absolute_uri(s.image.url) if s.image else ""
+                        "image_url": request.build_absolute_uri(s.image.url) if s.image else "",
+                        "image_urls": _get_all_image_urls(s)
                     } for s in project.sceneries.all()]
                 }
             }
@@ -630,13 +723,15 @@ class RegenerateMergedPagesView(APIView):
                         "name": c.name,
                         "description": c.description,
                         "metadata": c.metadata,
-                        "image_url": c.image.name if c.image else ""
+                        "image_url": c.image.name if c.image else "",
+                        "image_urls": _get_all_image_urls(c)
                     } for c in project.characters.all()],
                     "sceneries": [{
                         "name": s.name,
                         "description": s.description,
                         "metadata": s.metadata,
-                        "image_url": s.image.name if s.image else ""
+                        "image_url": s.image.name if s.image else "",
+                        "image_urls": _get_all_image_urls(s)
                     } for s in project.sceneries.all()]
                 }
             }

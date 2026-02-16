@@ -239,11 +239,12 @@ class CharacterManager:
         
         print(f"DEBUG: [CharacterManager] Starting visual trait extraction for '{name}' with {len(image_urls)} images.")
         
-        # Prefer direct vision model (Gemini 1.5 Flash is efficient here)
+        # Prefer direct vision model (Gemini 2.0 Flash is efficient here)
         llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0)
         
+        image_count_text = f"esta imagen de referencia" if len(image_urls) == 1 else f"estas {len(image_urls)} imágenes de referencia"
         traits_prompt = f"""
-        Analiza estas imágenes de referencia del personaje '{name}'.
+        Analiza {image_count_text} del personaje '{name}'.
         Extrae rasgos visuales invariantes y detallados para incluirlos en prompts de generación de imágenes.
         Enfócate en:
         - Peinado y color de cabello (textura).
@@ -252,45 +253,45 @@ class CharacterManager:
         - Ropa base o accesorios característicos.
         - Paleta de colores predominante.
         
+        Si hay múltiples imágenes, busca los rasgos que se mantienen CONSISTENTES entre todas ellas.
+        
         Responde en formato JSON:
         {{"traits": ["pelirrojo con peinado despeinado", "ojo izquierdo plateado", "pequeña cicatriz en mejilla derecha", ...]}}
         """
         
-        # For now, let's assume we can get one image to analyze
-        image_url = image_urls[0]
-        
-        # Detect extension for MIME type (handling pre-signed URLs with query params)
-        base_path = image_url.split('?')[0]
-        ext = os.path.splitext(base_path)[1].lower()
-        mime_type = "image/jpeg" if ext in ['.jpg', '.jpeg', '.jfif'] else "image/png"
-        
         try:
-            # Download image data
-            if image_url.startswith("s3://"):
-                km = KnowledgeManager(self.project_id)
-                local_path = km._download_from_s3(image_url)
-                with open(local_path, "rb") as f:
-                    img_data = base64.b64encode(f.read()).decode("utf-8")
-            else:
-                import requests
-                print(f"DEBUG: Downloading image from URL: {image_url[:80]}...")
-                r = requests.get(image_url, timeout=30)
-                r.raise_for_status()
-                img_data = base64.b64encode(r.content).decode("utf-8")
-
-            print(f"DEBUG: Image downloaded for {name}. Size: {len(img_data)} bytes. Detected MIME: {mime_type}")
-
-            message = HumanMessage(
-                content=[
-                    {"type": "text", "text": traits_prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{mime_type};base64,{img_data}"},
-                    },
-                ]
-            )
+            # Build multimodal content with ALL images
+            content_parts = [{"type": "text", "text": traits_prompt}]
             
-            print(f"DEBUG: Invoking Gemini Vision for {name}...")
+            for image_url in image_urls:
+                # Detect extension for MIME type (handling pre-signed URLs with query params)
+                base_path = image_url.split('?')[0]
+                ext = os.path.splitext(base_path)[1].lower()
+                mime_type = "image/jpeg" if ext in ['.jpg', '.jpeg', '.jfif'] else "image/png"
+                
+                # Download image data
+                if image_url.startswith("s3://"):
+                    km = KnowledgeManager(self.project_id)
+                    local_path = km._download_from_s3(image_url)
+                    with open(local_path, "rb") as f:
+                        img_data = base64.b64encode(f.read()).decode("utf-8")
+                else:
+                    import requests
+                    print(f"DEBUG: Downloading image from URL: {image_url[:80]}...")
+                    r = requests.get(image_url, timeout=30)
+                    r.raise_for_status()
+                    img_data = base64.b64encode(r.content).decode("utf-8")
+                
+                print(f"DEBUG: Image downloaded for {name}. Size: {len(img_data)} bytes. Detected MIME: {mime_type}")
+                
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime_type};base64,{img_data}"},
+                })
+
+            message = HumanMessage(content=content_parts)
+            
+            print(f"DEBUG: Invoking Gemini Vision for {name} with {len(image_urls)} images...")
             response = llm.invoke([message])
             content = response.content.strip()
             print(f"DEBUG: Raw AI Response for {name}: {content}")
@@ -434,8 +435,9 @@ class SceneryManager:
         
         llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0)
         
+        image_count_text = f"esta imagen de referencia" if len(image_urls) == 1 else f"estas {len(image_urls)} imágenes de referencia"
         traits_prompt = f"""
-        Analiza estas imágenes de referencia del escenario '{name}'.
+        Analiza {image_count_text} del escenario '{name}'.
         Extrae rasgos visuales invariantes y detallados para incluirlos en prompts de generación de imágenes.
         Enfócate en:
         - Arquitectura y estructura (ventanas, techos, materiales).
@@ -444,37 +446,40 @@ class SceneryManager:
         - Esquema de iluminación habitual (fuentes de luz, sombras).
         - Paleta de colores distintiva del lugar.
         
+        Si hay múltiples imágenes, busca los rasgos que se mantienen CONSISTENTES entre todas ellas.
+        
         Responde en formato JSON:
         {{"traits": ["paredes de ladrillo visto", "gran ventana circular al fondo", "iluminación neón púrpura", ...]}}
         """
         
-        image_url = image_urls[0]
-        base_path = image_url.split('?')[0]
-        ext = os.path.splitext(base_path)[1].lower()
-        mime_type = "image/jpeg" if ext in ['.jpg', '.jpeg', '.jfif'] else "image/png"
-        
         try:
-            if image_url.startswith("s3://"):
-                km = KnowledgeManager(self.project_id)
-                local_path = km._download_from_s3(image_url)
-                with open(local_path, "rb") as f:
-                    img_data = base64.b64encode(f.read()).decode("utf-8")
-            else:
-                import requests
-                r = requests.get(image_url, timeout=30)
-                r.raise_for_status()
-                img_data = base64.b64encode(r.content).decode("utf-8")
-
-            message = HumanMessage(
-                content=[
-                    {"type": "text", "text": traits_prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{mime_type};base64,{img_data}"},
-                    },
-                ]
-            )
+            # Build multimodal content with ALL images
+            content_parts = [{"type": "text", "text": traits_prompt}]
             
+            for image_url in image_urls:
+                base_path = image_url.split('?')[0]
+                ext = os.path.splitext(base_path)[1].lower()
+                mime_type = "image/jpeg" if ext in ['.jpg', '.jpeg', '.jfif'] else "image/png"
+                
+                if image_url.startswith("s3://"):
+                    km = KnowledgeManager(self.project_id)
+                    local_path = km._download_from_s3(image_url)
+                    with open(local_path, "rb") as f:
+                        img_data = base64.b64encode(f.read()).decode("utf-8")
+                else:
+                    import requests
+                    r = requests.get(image_url, timeout=30)
+                    r.raise_for_status()
+                    img_data = base64.b64encode(r.content).decode("utf-8")
+                
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime_type};base64,{img_data}"},
+                })
+            
+            message = HumanMessage(content=content_parts)
+            
+            print(f"DEBUG: Invoking Gemini Vision for scenery {name} with {len(image_urls)} images...")
             response = llm.invoke([message])
             content = response.content.strip()
             
