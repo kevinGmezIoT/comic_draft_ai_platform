@@ -6,9 +6,7 @@ from openai import OpenAI
 class ImageModelAdapter(ABC):
     @abstractmethod
     def generate_image(self, prompt: str, style_prompt:str, aspect_ratio: str = "1:1", init_image_path: str = None, context_images: list = None, **kwargs) -> str:
-        """Generates an image and returns the URL or S3 path. 
-        init_image_path: used for image-to-image variations.
-        context_images: list of URLs or S3 paths to use as multimodal context (Gemini)."""
+        """Generates an image and returns the URL or S3 path."""
         pass
 
     def generate_panel(self, prompt: str, style_prompt:str, aspect_ratio: str = "1:1", context_images: list = None, **kwargs) -> str:
@@ -189,7 +187,7 @@ class GoogleGeminiAdapter(ImageModelAdapter):
         
         # Initialize LangChain model for traceability
         # We use a lower temperature for consistent results
-        self.model_id = "gemini-2.5-flash-image"
+        self.model_id = os.getenv("GEMINI_MODEL_ID_IMAGES")
         self.llm = ChatGoogleGenerativeAI(
             model=self.model_id,
             google_api_key=self.api_key,

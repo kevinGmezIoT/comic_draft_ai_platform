@@ -42,6 +42,7 @@ def generate_comic_logic(project_id, sources, max_pages=3, max_panels=None, layo
     Core logic for initial comic generation.
     """
     print(f"--- GENERATING COMIC: Project {project_id} ---")
+    global_context = kwargs.get('global_context', {})
     
     initial_state = {
         "project_id": project_id,
@@ -52,11 +53,12 @@ def generate_comic_logic(project_id, sources, max_pages=3, max_panels=None, layo
         "plan_only": kwargs.get("plan_only", False),
         "panels": kwargs.get("panels", []),
         "merged_pages": [],
+        "style_guide": global_context.get('style_guide', ""),
         "world_model_summary": "",
         "script_outline": [],
         "current_step": "start",
         "reference_images": kwargs.get("reference_images", []),
-        "global_context": kwargs.get("global_context", {})
+        "global_context": global_context
     }
 
     try:

@@ -5,8 +5,6 @@ description = "Agente de IA para el borrador de cómics"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "flask",
-    "flask-cors",
     "python-dotenv",
     "langchain",
     "langchain-openai",
@@ -16,8 +14,6 @@ dependencies = [
     "pydantic",
     "requests",
     "boto3",
-    "celery[redis]",
-    "redis",
     "chromadb",
     "pypdf",
     "docx2txt",
