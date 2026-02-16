@@ -11,7 +11,7 @@ class BedrockAgentClient:
     def __init__(self):
         # Increase timeout for long-running AI generations
         config = Config(
-            read_timeout=300,
+            read_timeout=400,
             connect_timeout=30,
             retries={'max_attempts': 0}
         )

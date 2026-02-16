@@ -114,10 +114,10 @@ def regenerate_panel_logic(project_id, panel_id, prompt, scene_description, ball
             
             p['reference_image_url'] = kwargs.get('reference_image_url', p.get('reference_image_url'))
         
-        # Ensure characters field exists (mapping from character_refs if necessary)
-        if 'characters' not in p:
+        if not p.get('characters'):
+            # Enforce use of character_refs specifically for lookups in PromptBuilder
             p['characters'] = p.get('character_refs', [])
-        
+            
         # Fallback: if characters is still empty, extract from balloons
         if not p['characters']:
             balloon_chars = list(set(
@@ -178,11 +178,14 @@ def regenerate_merge_logic(project_id, instructions, **kwargs):
         if 'characters' not in p:
             p['characters'] = p.get('character_refs', [])
         processed_panels.append(p)
-        
+
+    print("-> Page number:", kwargs.get('page_number'))   
     state = {
-        "action": "regenerate_merge", # Note: Need to add this to router if needed later
+        "action": "regenerate_merge", 
         "project_id": project_id,
-        "world_model_summary": world_model_summary,
+        "page_number": kwargs.get('page_number'), # CRITICAL: Pass page_number for selective merge
+        "instructions": instructions,
+        "world_model_summary": kwargs.get('world_model_summary', ""),
         "panels": processed_panels,
         "merged_pages": [],
         "style_guide": global_context.get('style_guide', ""),

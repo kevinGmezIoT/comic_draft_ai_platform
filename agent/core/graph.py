@@ -34,12 +34,14 @@ class AgentState(TypedDict):
     panels: List[Panel]
     merged_pages: List[dict] # [{page_number: 1, image_url: "..."}]
     canvas_dimensions: str
-    plan_only: bool = False
+    plan_only: bool
     current_step: str
-    action: str = "generate" # "generate" | "regenerate_panel"
-    panel_id: str = None
-    current_image_url: str = None # Context for I2I
-    reference_image_url: str = None # Visual reference context
+    action: str # "generate" | "regenerate_panel" | "regenerate_merge"
+    panel_id: str
+    page_number: int # For selective page merge
+    instructions: str # User instructions for regeneration
+    current_image_url: str # Context for I2I
+    reference_image_url: str # Visual reference context
     continuity_state: Dict[str, Dict] # State tracking for Agent H
     reference_images: List[str]
     global_context: Dict # Optional metadata from backend
@@ -974,9 +976,10 @@ def image_generator(state: AgentState):
             # For massive generation, fallback to what's in the panel dict if present
             current_img = panel.get("current_image_url") or panel.get("image_url")
             
-        # Coleccionar imágenes de contexto (Personajes del panel + Imagen de Referencia)
+        # 1a. Coleccionar imágenes de contexto (Priorizar 'character_refs' del backend)
         context_images = []
-        for char_name in panel.get("characters", []):
+        char_source_list = panel.get("character_refs") or panel.get("characters", [])
+        for char_name in char_source_list:
             char_refs = cm.get_character_images(char_name)
             if char_refs:
                 context_images.extend(char_refs)
@@ -1153,12 +1156,15 @@ def page_merger(state: AgentState):
     
     pages = {}
     target_page = state.get("page_number")
+    print(f"DEBUG: Target page: {target_page}")
     
     for p in state["panels"]:
         p_num = p["page_number"]
         if target_page and int(p_num) != int(target_page):
+            print(f"DEBUG: Skipping panel {p_num} for page {target_page}")
             continue
         if p_num not in pages: pages[p_num] = []
+        print(f"DEBUG: Adding panel {p_num} to page {p_num}")
         pages[p_num].append(p)
         
     merged_results = state.get("merged_pages", [])
@@ -1168,7 +1174,7 @@ def page_merger(state: AgentState):
         
     last_page_s3_key = None
     sorted_page_nums = sorted(pages.keys(), key=int)
-    
+    print(sorted_page_nums)
     for page_num in sorted_page_nums:
         panel_list = pages[page_num]
         print(f"Merging Page {page_num}...")

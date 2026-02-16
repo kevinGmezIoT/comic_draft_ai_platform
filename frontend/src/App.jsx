@@ -81,7 +81,7 @@ function App() {
                 const backendMaxPanels = response.data.max_panels || allPanels.length || 6;
                 const actualMaxPanelsPerPage = response.data.pages.reduce((max, p) => Math.max(max, p.panels.length), 0) || 4;
 
-                const isBackendBusy = response.data.status === 'processing' || response.data.status === 'queued';
+                const isBackendBusy = response.data.status === 'processing' || response.data.status === 'queued' || response.data.status === 'generating';
 
                 // Solo actualizamos la estructura del proyecto si:
                 // 1. No estamos en medio de una generación local (según el Ref)

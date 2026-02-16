@@ -735,6 +735,8 @@ class RegenerateMergedPagesView(APIView):
                     } for s in project.sceneries.all()]
                 }
             }
+
+            print("PAYLOAD:", payload)
             
             project.status = "generating"
             project.save()
