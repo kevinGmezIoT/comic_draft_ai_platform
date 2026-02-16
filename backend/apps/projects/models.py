@@ -74,6 +74,7 @@ class Panel(models.Model):
     balloons = models.JSONField(default=list, blank=True)
     layout = models.JSONField(default=dict, blank=True)
     character_refs = models.JSONField(default=list, blank=True)
+    scenery_refs = models.JSONField(default=list, blank=True)
     
     # Context Engineering Overrides
     panel_style = models.TextField(blank=True, null=True, help_text="Override style for this specific panel")

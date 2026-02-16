@@ -41,7 +41,6 @@ class GenerateComicView(APIView):
                 max_pages = int(req_max_pages) if req_max_pages is not None else project.pages.count() or 1
                 
                 raw_mppp = request.data.get("panels_per_page")
-                print(f"DEBUG: [PLAN ONLY] panels_per_page raw: {raw_mppp}")
 
                 if raw_mppp == 'auto' or raw_mppp is None:
                     panels_per_page = None
@@ -51,7 +50,6 @@ class GenerateComicView(APIView):
                 # Si es AUTO (None), no podemos usar el FAST PATH síncrono porque requiere IA. 
                 # Delegamos al Agente (Slow Path) para que haga el trabajo inteligente.
                 if panels_per_page is None:
-                    print("DEBUG: [PLAN ONLY] IA Decide detected. Routing to Agent Slow Path.")
                     pass # Continuar hacia la lógica del agente abajo
                 else:
                     target_page_num = request.data.get("page_number") # Opcional: solo regenerar una página
@@ -115,7 +113,6 @@ class GenerateComicView(APIView):
                     project.save()
                     return Response({"status": "completed", "message": f"Layout designed for {max_pages} pages."}, status=status.HTTP_200_OK)
             except (ValueError, TypeError) as e:
-                print(f"DEBUG: Fast path error or IA Decide requirement: {e}")
                 # Si falla o es IA decide, caemos al slow path del agente
                 pass
 
@@ -187,9 +184,6 @@ class GenerateComicView(APIView):
         }
 
         import json
-        print(f"DEBUG: Payload sent to Agent: {json.dumps(payload, indent=2, ensure_ascii=False)}")
-
-        print(f"DEBUG: Enviando peticion al Bedrock Agent: {project.id}")
         try:
             project.status = "generating"
             project.last_error = None
@@ -210,7 +204,6 @@ class GenerateComicView(APIView):
                 "message": "Generation process started in Bedrock Agent"
             }, status=status.HTTP_202_ACCEPTED)
         except Exception as e:
-            print(f"ERROR: Fallo al invocar al Bedrock Agent: {str(e)}")
             return Response({"error": f"Bedrock Agent error: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 class ProjectDetailView(APIView):
@@ -287,7 +280,6 @@ class ProjectDetailView(APIView):
 class AgentCallbackView(APIView):
     """Webhook para que el Agente notifique resultados"""
     def post(self, request, project_id):
-        print(f"DEBUG: [CALLBACK] Received request for project {project_id}")
         try:
             result = process_agent_result(project_id, request.data)
             
@@ -330,7 +322,6 @@ class CreateProjectView(APIView):
                 file=script_file,
                 note_type="script"
             )
-            print(f"DEBUG S3: Guión subido correctamente. URL: {note.file.url}")
 
         return Response({"id": project.id, "name": project.name}, status=status.HTTP_201_CREATED)
 
@@ -443,13 +434,10 @@ class CharacterCreateView(APIView):
             image_file = request.FILES.get('image')
             if image_file:
                 character.image = image_file
-                print(f"DEBUG S3: Subiendo imagen de personaje '{character.name}'...")
             elif request.data.get('image_url'):
                 character.image.name = request.data.get('image_url')
             
             character.save()
-            if image_file:
-                print(f"DEBUG S3: Imagen de personaje subida. URL: {character.image.url}")
 
             # Handle multiple reference images
             ref_files = request.FILES.getlist('reference_images')
@@ -459,7 +447,6 @@ class CharacterCreateView(APIView):
                     image=ref_file,
                     order=i
                 )
-                print(f"DEBUG S3: Reference image {i+1} uploaded for character '{character.name}'")
 
             return Response({"id": character.id}, status=status.HTTP_201_CREATED)
         except Project.DoesNotExist:
@@ -574,13 +561,10 @@ class SceneryCreateView(APIView):
             image_file = request.FILES.get('image')
             if image_file:
                 scenery.image = image_file
-                print(f"DEBUG S3: Subiendo imagen de escenario '{scenery.name}'...")
             elif request.data.get('image_url'):
                 scenery.image.name = request.data.get('image_url')
             
             scenery.save()
-            if image_file:
-                print(f"DEBUG S3: Imagen de escenario subida. URL: {scenery.image.url}")
 
             # Handle multiple reference images
             ref_files = request.FILES.getlist('reference_images')
@@ -590,7 +574,6 @@ class SceneryCreateView(APIView):
                     image=ref_file,
                     order=i
                 )
-                print(f"DEBUG S3: Reference image {i+1} uploaded for scenery '{scenery.name}'")
 
             return Response({"id": scenery.id}, status=status.HTTP_201_CREATED)
         except Project.DoesNotExist:
@@ -657,8 +640,9 @@ class RegeneratePanelView(APIView):
                     "status": p.status,
                     "balloons": p.balloons,
                     "layout": p.layout,
-                    "character_refs": p.character_refs
-                } for p in Panel.objects.filter(page__project=project)],
+                    "character_refs": p.character_refs,
+                    "scenery_refs": p.scenery_refs
+                } for p in Panel.objects.filter(page__project=project).order_by('page__page_number', 'order')],
                 "global_context": {
                     "style_guide": project.style_guide,
                     "characters": [{
@@ -680,8 +664,6 @@ class RegeneratePanelView(APIView):
             
             project.status = "generating"
             project.save()
-
-            print("PAYLOAD:", payload)
             
             client = BedrockAgentClient()
             threading.Thread(target=client.invoke, args=(payload, project.id)).start()
@@ -715,8 +697,9 @@ class RegenerateMergedPagesView(APIView):
                     "status": p.status,
                     "balloons": p.balloons,
                     "layout": p.layout,
-                    "character_refs": p.character_refs
-                } for p in Panel.objects.filter(page__project=project)],
+                    "character_refs": p.character_refs,
+                    "scenery_refs": p.scenery_refs
+                } for p in Panel.objects.filter(page__project=project).order_by('page__page_number', 'order')],
                 "global_context": {
                     "style_guide": project.style_guide,
                     "characters": [{
@@ -735,8 +718,6 @@ class RegenerateMergedPagesView(APIView):
                     } for s in project.sceneries.all()]
                 }
             }
-
-            print("PAYLOAD:", payload)
             
             project.status = "generating"
             project.save()

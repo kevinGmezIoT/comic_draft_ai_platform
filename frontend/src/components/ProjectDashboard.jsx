@@ -2,7 +2,8 @@ import React, { useState, useEffect } from 'react';
 import {
     Users, Map, FileText, Zap,
     ArrowRight, Edit3, Trash2, Plus, Layout,
-    Save, X, BookOpen, Palette, Info, Upload, Loader2, Image as ImageIcon
+    Save, X, BookOpen, Palette, Info, Upload, Loader2, Image as ImageIcon,
+    Sparkles, Lightbulb, AlertCircle, Rocket
 } from 'lucide-react';
 import axios from 'axios';
 
@@ -119,6 +120,8 @@ const ProjectDashboard = ({ projectId, onStartGeneration }) => {
         }
     };
 
+    if (!projectId) return <EmptyState />;
+
     if (loading) return (
         <div className="flex flex-col items-center justify-center h-[60vh] text-gray-400">
             <Loader2 className="animate-spin mb-4 text-purple-500" size={40} />
@@ -126,7 +129,13 @@ const ProjectDashboard = ({ projectId, onStartGeneration }) => {
         </div>
     );
 
-    if (!project) return <div>Error al cargar el proyecto</div>;
+    if (!project) return (
+        <div className="flex flex-col items-center justify-center h-[60vh] text-gray-400">
+            <AlertCircle className="mb-4 text-red-500" size={40} />
+            <p className="text-xl font-bold">Error al cargar el proyecto</p>
+            <button onClick={fetchProject} className="mt-4 text-purple-400 hover:text-purple-300 underline font-bold">Reintentar</button>
+        </div>
+    );
 
     return (
         <div className="w-full max-w-6xl space-y-12 animate-in fade-in duration-500 pb-20 px-4">
@@ -681,5 +690,89 @@ const AssetForm = ({ type, initialData, onSubmit, onCancel }) => {
         </form>
     );
 };
+
+const EmptyState = () => (
+    <div className="w-full max-w-4xl animate-in fade-in slide-in-from-bottom-8 duration-700 pb-20">
+        <div className="text-center mb-16">
+            <div className="inline-flex items-center justify-center p-4 bg-purple-600/10 rounded-3xl border border-purple-500/20 mb-6 group hover:scale-110 transition-transform">
+                <Rocket size={48} className="text-purple-500 group-hover:rotate-12 transition-transform" />
+            </div>
+            <h1 className="text-6xl font-black text-white tracking-tighter mb-4">¡Crea tu primer proyecto!</h1>
+            <p className="text-gray-400 text-xl max-w-2xl mx-auto leading-relaxed">
+                Transforma tus ideas en narrativa visual. Para obtener los mejores resultados, te recomendamos tener preparados los siguientes elementos:
+            </p>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-16">
+            <div className="bg-gray-900/40 border border-gray-800 p-8 rounded-[2rem] hover:border-purple-500/30 transition-all group">
+                <div className="flex items-center gap-4 mb-4">
+                    <div className="p-3 bg-purple-600/10 rounded-xl text-purple-400">
+                        <FileText size={24} />
+                    </div>
+                    <h3 className="text-xl font-bold text-white">Guión Detallado</h3>
+                </div>
+                <p className="text-gray-500 leading-relaxed text-sm">
+                    Un archivo PDF con la descripción de escenas y diálogos. Especificar números de página ayuda a la IA a organizar el layout.
+                </p>
+            </div>
+
+            <div className="bg-gray-900/40 border border-gray-800 p-8 rounded-[2rem] hover:border-blue-500/30 transition-all group">
+                <div className="flex items-center gap-4 mb-4">
+                    <div className="p-3 bg-blue-600/10 rounded-xl text-blue-400">
+                        <Users size={24} />
+                    </div>
+                    <h3 className="text-xl font-bold text-white">Diseños de Personajes</h3>
+                </div>
+                <p className="text-gray-500 leading-relaxed text-sm">
+                    Imágenes de referencia o descripciones físicas detalladas para mantener la consistencia visual en cada viñeta.
+                </p>
+            </div>
+
+            <div className="bg-gray-900/40 border border-gray-800 p-8 rounded-[2rem] hover:border-green-500/30 transition-all group">
+                <div className="flex items-center gap-4 mb-4">
+                    <div className="p-3 bg-green-600/10 rounded-xl text-green-400">
+                        <Sparkles size={24} />
+                    </div>
+                    <h3 className="text-xl font-bold text-white">Fichas y Canon</h3>
+                </div>
+                <p className="text-gray-500 leading-relaxed text-sm">
+                    Define la personalidad, habilidades y motivaciones de tus personajes para que el "Cerebro" de la IA entienda el Lore.
+                </p>
+            </div>
+
+            <div className="bg-gray-900/40 border border-gray-800 p-8 rounded-[2rem] hover:border-yellow-500/30 transition-all group">
+                <div className="flex items-center gap-4 mb-4">
+                    <div className="p-3 bg-yellow-600/10 rounded-xl text-yellow-400">
+                        <Lightbulb size={24} />
+                    </div>
+                    <h3 className="text-xl font-bold text-white">Ideas de la Historia</h3>
+                </div>
+                <p className="text-gray-500 leading-relaxed text-sm">
+                    Tener claro el tono (oscuro, fantástico, cómico) y la paleta de colores deseada para guiar la generación estética.
+                </p>
+            </div>
+        </div>
+
+        <div className="bg-amber-950/20 border border-amber-900/30 p-8 rounded-3xl relative overflow-hidden">
+            <div className="flex items-start gap-4">
+                <AlertCircle className="text-amber-500 shrink-0 mt-1" size={24} />
+                <div>
+                    <h4 className="text-amber-500 font-black uppercase tracking-widest text-xs mb-2">Aviso Importante</h4>
+                    <p className="text-amber-200/70 text-sm leading-relaxed">
+                        Esta plataforma está diseñada como una herramienta de primer acercamiento y apoyo para <strong>guionistas y creativos</strong>.
+                        El resultado es una narrativa visual de base; una vez completado este proceso, recomendamos encarecidamente trabajar con un
+                        <strong> ilustrador profesional</strong> para pulir el arte final y darle el acabado definitivo a tu cómic.
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <div className="mt-12 text-center">
+            <p className="text-gray-600 text-sm font-bold uppercase tracking-widest flex items-center justify-center gap-3">
+                Usa el botón <span className="text-purple-500">"+ Nuevo Proyecto"</span> en la barra lateral para comenzar.
+            </p>
+        </div>
+    </div>
+);
 
 export default ProjectDashboard;

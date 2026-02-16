@@ -31,9 +31,7 @@ class BedrockAgentClient:
         if not self.agent_arn:
             raise ValueError("BEDROCK_AGENT_ARN is not configured in environment variables.")
 
-        try:
-            print(f"DEBUG: Invoking Bedrock Agent Runtime {self.agent_arn} for project {project_id}")
-            
+        try:            
             boto3_response = self.client.invoke_agent_runtime(
                 agentRuntimeArn=self.agent_arn,
                 qualifier="DEFAULT",
@@ -70,10 +68,8 @@ class BedrockAgentClient:
                     try:
                         return json.loads(full_text)
                     except json.JSONDecodeError as e:
-                        print(f"ERROR: JSON decoding failed at char {e.pos}. Text slice: {full_text[max(0, e.pos-50):e.pos+50]}")
                         raise e
                 return {"status": "error", "message": "No response events received from agent."}
 
         except Exception as e:
-            print(f"ERROR: Bedrock AgentCore invocation failed: {str(e)}")
             raise e

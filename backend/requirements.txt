@@ -8,3 +8,5 @@ whitenoise
 dj-database-url
 django-storages
 boto3
+pillow>=12.1.0
+gunicorn>=23.0.0

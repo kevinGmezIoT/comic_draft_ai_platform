@@ -89,9 +89,20 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'core_project.wsgi.application'
 
+# Database configuration
+# First try DATABASE_URL, then individual SQL variables, finally default
+DATABASE_URL = os.getenv('DATABASE_URL')
+if not DATABASE_URL and os.getenv('SQL_HOST'):
+    db_user = os.getenv('SQL_USER', 'postgres')
+    db_pass = os.getenv('SQL_PASSWORD', 'postgres')
+    db_host = os.getenv('SQL_HOST', 'db')
+    db_port = os.getenv('SQL_PORT', '5432')
+    db_name = os.getenv('SQL_DATABASE', 'comic_draft')
+    DATABASE_URL = f"postgres://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}"
+
 DATABASES = {
     'default': dj_database_url.config(
-        default=os.getenv('DATABASE_URL', 'postgres://user:pass@db:5432/comic_db')
+        default=DATABASE_URL or 'postgres://postgres:postgres@db:5432/comic_draft'
     )
 }
 
@@ -103,9 +114,14 @@ USE_I18N = True
 USE_TZ = True
 
 STATIC_URL = 'static/'
+STATIC_ROOT = os.path.join(BASE_DIR, 'static')
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 CORS_ALLOW_ALL_ORIGINS = True
+
+# Upload limits
+DATA_UPLOAD_MAX_MEMORY_SIZE = 52428800  # 50MB
+FILE_UPLOAD_MAX_MEMORY_SIZE = 52428800  # 50MB
 
 AGENT_SERVICE_URL = os.getenv('AGENT_SERVICE_URL', 'http://agent:8001')

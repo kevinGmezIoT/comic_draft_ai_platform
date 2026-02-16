@@ -1,0 +1,22 @@
+{
+  "name": "comic_draft_ai_platform",
+  "version": "1.0.0",
+  "description": "![Logo](https://img.shields.io/badge/Status-Production--Ready-green)\r ![Tech](https://img.shields.io/badge/Stack-Django%20%7C%20React%20%7C%20LangGraph-blue)",
+  "main": "index.js",
+  "scripts": {},
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kevinGmezIoT/comic_draft_ai_platform.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/kevinGmezIoT/comic_draft_ai_platform/issues"
+  },
+  "homepage": "https://github.com/kevinGmezIoT/comic_draft_ai_platform#readme",
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "@types/node": "^25.2.3"
+  }
+}

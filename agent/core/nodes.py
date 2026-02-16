@@ -728,8 +728,8 @@ def image_generator(state: AgentState):
                 context_images.extend(char_refs)
         
         # 1b. Escenario reference
-        scene_name = panel.get("scenery")
-        if scene_name:
+        scene_source_list = panel.get("scenery_refs") or ([panel.get("scenery")] if panel.get("scenery") else [])
+        for scene_name in scene_source_list:
             scene_refs = scm.get_scenery_images(scene_name)
             if scene_refs:
                 context_images.extend(scene_refs)
@@ -901,7 +901,10 @@ def page_merger(state: AgentState):
     target_page = state.get("page_number")
     print(f"DEBUG: Target page: {target_page}")
     
-    for p in state["panels"]:
+    # Sort panels by page and order to ensure correct layering (z-index logic)
+    sorted_panels = sorted(state["panels"], key=lambda x: (int(x.get("page_number", 0)), int(x.get("order_in_page", 0))))
+    
+    for p in sorted_panels:
         p_num = p["page_number"]
         if target_page and int(p_num) != int(target_page):
             print(f"DEBUG: Skipping panel {p_num} for page {target_page}")

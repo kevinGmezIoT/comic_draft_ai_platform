@@ -97,7 +97,6 @@ class PromptBuilder:
             INSTRUCCIONES DE CAMBIO: {instructions}
             
             DISEÑO: {w}%x{h}% ({aspect_ratio}).
-            CONTEXTO MUNDO: {world_summary[:500]}
             
             REGLAS CANÓNICAS DE APARIENCIA (ESTRICTO): 
             ---
@@ -120,7 +119,6 @@ class PromptBuilder:
             ESCENA: {scene_desc}
             ESTILO BASE: {style_part}
             DISEÑO PANEL: {w}% de ancho x {h}% de alto ({aspect_ratio}).
-            CONTEXTO MUNDO: {world_summary[:500]}
             
             REGLAS CANÓNICAS DE APARIENCIA (ESTRICTO):
             ---

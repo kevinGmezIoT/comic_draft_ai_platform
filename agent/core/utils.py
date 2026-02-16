@@ -33,6 +33,10 @@ class PageRenderer:
         Crea un collage de los paneles basado en sus coordenadas de layout.
         Retorna la ruta a una imagen temporal.
         """
+        # Sort panels by order to ensure correct layering (z-index)
+        # Backend uses 'order', Agent state uses 'order_in_page'. We try both.
+        panels = sorted(panels, key=lambda p: int(p.get('order_in_page', p.get('order', 0))))
+
         # First pass: calculate required canvas size to fit all panels
         required_w = self.page_width
         required_h = self.page_height
