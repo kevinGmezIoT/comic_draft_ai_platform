@@ -309,7 +309,7 @@ const EditorCanvas = ({ panels, onSelectPanel, selectedId, onUpdateLayout, curre
   };
 
   return (
-    <div className="bg-gray-900 p-8 flex justify-center items-center shadow-inner rounded-2xl w-full select-none overflow-auto">
+    <div className="bg-gray-900 p-8 flex justify-center items-start shadow-inner rounded-2xl w-full select-none overflow-auto">
       <div className="shadow-2xl border border-gray-800 rounded-lg overflow-hidden bg-white transition-all duration-300">
         <Stage
           width={CANVAS_WIDTH}

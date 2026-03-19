@@ -148,9 +148,44 @@ function App() {
     }, [editingBalloons]);
 
     const handleGenerate = async (settings = {}) => {
+        const action = settings.action;
+        const isOpenEditorAction = action === 'open_editor_existing';
+        const isCreateInitialLayoutAction = action === 'create_initial_layout';
+        const isReorganizeLayoutAction = action === 'reorganize_layout';
+        const isGenerateAllExistingAction = action === 'generate_all_existing';
+        const isLayoutAction = isCreateInitialLayoutAction || isReorganizeLayoutAction;
+        const usesRequestedLayoutSettings = !isGenerateAllExistingAction && (
+            isLayoutAction ||
+            settings.max_pages !== undefined ||
+            settings.panels_per_page !== undefined ||
+            settings.layout_style !== undefined
+        );
+
         setLoading(true);
-        isGeneratingRef.current = true;
         setError(null);
+
+        if (isOpenEditorAction) {
+            try {
+                await fetchProjectData();
+            } catch (error) {
+                console.error("Error opening existing layout:", error);
+            }
+
+            const existingPageCount = pages.length || activeMaxPages || 1;
+
+            setView('editor');
+            setViewMode('draft');
+            setActiveMaxPages(existingPageCount);
+
+            if (currentPage > existingPageCount) {
+                setCurrentPage(1);
+            }
+
+            setLoading(false);
+            return;
+        }
+
+        isGeneratingRef.current = true;
 
         // Use the ref to guarantee we have the absolute latest panels state,
         // not a potentially stale closure capture.
@@ -180,19 +215,27 @@ function App() {
 
         // Siempre intentamos sincronizar los paneles existentes si los hay, 
         // para que el agente reconozca IDs de paneles ya creados y mantenga sus layouts.
-        const panelsToSync = (panels.length > 0) ? existingPanels : [];
+        const panelsToSync = (latestPanels.length > 0) ? existingPanels : [];
 
-        const currentMaxPages = settings.max_pages || maxPages;
-        const requestedPanels = settings.panels_per_page || maxPanelsPerPage;
+        const currentMaxPages = usesRequestedLayoutSettings
+            ? (settings.max_pages || maxPages)
+            : (activeMaxPages || pages.length || maxPages);
+        const requestedPanels = usesRequestedLayoutSettings
+            ? (settings.panels_per_page || maxPanelsPerPage)
+            : maxPanelsPerPage;
 
-        if (settings.max_pages) setMaxPages(settings.max_pages);
-        if (settings.panels_per_page) setMaxPanelsPerPage(settings.panels_per_page);
-        if (settings.layout_style) setLayoutStyle(settings.layout_style);
+        if (usesRequestedLayoutSettings) {
+            if (settings.max_pages) setMaxPages(settings.max_pages);
+            if (settings.panels_per_page) setMaxPanelsPerPage(settings.panels_per_page);
+            if (settings.layout_style) setLayoutStyle(settings.layout_style);
+        }
 
         // Actualizamos el indicador de páginas activas para dar feedback inmediato.
         // Si es una regeneración total, es obligatorio. Si es parcial (una página),
         // también lo hacemos para que el indicador de navegación refleje la nueva estructura.
-        setActiveMaxPages(currentMaxPages);
+        if (isLayoutAction) {
+            setActiveMaxPages(currentMaxPages);
+        }
 
         // Si la página actual queda fuera del nuevo rango (ej: redujiste de 5 a 3 páginas),
         // volvemos a la página 1 para evitar errores visuales.
@@ -212,8 +255,10 @@ function App() {
         // Si es regeneración de página individual, usamos lo que ya tiene el proyecto para el resto
         // Si es regeneración total, usamos lo propuesto
         const currentMaxPanels = settings.page_number
-            ? (panels.filter(p => p.page_number !== settings.page_number).length + requestedPanels)
-            : (currentMaxPages * requestedPanels);
+            ? (latestPanels.filter(p => p.page_number !== settings.page_number).length + requestedPanels)
+            : (usesRequestedLayoutSettings
+                ? (currentMaxPages * requestedPanels)
+                : (latestPanels.length || (currentMaxPages * requestedPanels)));
 
         console.log("DEBUG: [FRONTEND] Settings State - Project Density:", projectDensity, "Target Panels for this Page:", requestedPanels, "Total Max Panels:", currentMaxPanels);
 
@@ -221,8 +266,8 @@ function App() {
             max_pages: currentMaxPages,
             max_panels: currentMaxPanels,
             panels_per_page: requestedPanels,
-            layout_style: settings.layout_style || layoutStyle,
-            plan_only: settings.plan_only || false,
+            layout_style: usesRequestedLayoutSettings ? (settings.layout_style || layoutStyle) : layoutStyle,
+            plan_only: isLayoutAction || settings.plan_only || false,
             page_number: settings.page_number,
             panels: panelsToSync
         };
@@ -232,16 +277,10 @@ function App() {
         try {
             // Switch to editor immediately
             setView('editor');
-            if (settings.plan_only) setViewMode('draft');
-
-            if (settings.skip_agent) {
-                // No need to call generate, just ensure we have data
-                setLoading(false);
-                return;
-            }
+            if (config.plan_only || isGenerateAllExistingAction) setViewMode('draft');
 
             let response;
-            if (settings.action === 'regenerate_panel') {
+            if (action === 'regenerate_panel') {
                 response = await axios.post(`${import.meta.env.VITE_API_URL}/panels/${settings.panel_id}/regenerate/`, {
                     prompt: settings.prompt,
                     scene_description: settings.scene_description,
@@ -403,11 +442,14 @@ function App() {
     if (view === 'wizard') {
         return (
             <div className="flex bg-gray-950 min-h-screen items-center justify-center p-10">
-                <ProjectWizard onComplete={(id) => {
-                    setProjectId(id);
-                    setView('dashboard');
-                    fetchProjects(); // Refresh sidebar
-                }} />
+                <ProjectWizard
+                    onComplete={(id) => {
+                        setProjectId(id);
+                        setView('dashboard');
+                        fetchProjects(); // Refresh sidebar
+                    }}
+                    onCancel={() => setView('dashboard')}
+                />
             </div>
         );
     }

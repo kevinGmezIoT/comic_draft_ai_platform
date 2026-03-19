@@ -137,6 +137,8 @@ const ProjectDashboard = ({ projectId, onStartGeneration }) => {
         </div>
     );
 
+    const hasExistingLayout = (project?.pages?.length || 0) > 0;
+
     return (
         <div className="w-full max-w-6xl space-y-12 animate-in fade-in duration-500 pb-20 px-4">
             {/* Project Header */}
@@ -399,7 +401,11 @@ const ProjectDashboard = ({ projectId, onStartGeneration }) => {
                         <div className="flex justify-between items-center mb-8">
                             <div>
                                 <h3 className="text-3xl font-black text-white uppercase tracking-tight">Preferencias de Maquetación</h3>
-                                <p className="text-gray-500 text-xs font-bold uppercase tracking-widest mt-1">Configura antes de generar</p>
+                                <p className="text-gray-500 text-xs font-bold uppercase tracking-widest mt-1">
+                                    {hasExistingLayout
+                                        ? 'Abrir editor conserva el layout actual; Reorganizar aplica estas opciones.'
+                                        : 'Configura y abre el editor para crear la maquetacion inicial.'}
+                                </p>
                             </div>
                             <button onClick={() => setIsLayoutModalOpen(false)} className="text-gray-500 hover:text-white transition-colors">
                                 <X size={24} />
@@ -460,57 +466,52 @@ const ProjectDashboard = ({ projectId, onStartGeneration }) => {
                             </div>
 
                             <div className="grid grid-cols-2 gap-4 mt-4">
-                                {(project?.pages?.length > 0) ? (
+                                {hasExistingLayout ? (
                                     <>
                                         <button
                                             onClick={() => {
-                                                // Sync settings but skip agent to just open the editor
                                                 onStartGeneration({
-                                                    max_pages: project.max_pages,
-                                                    layout_style: project.layout_style,
-                                                    plan_only: true,
-                                                    skip_agent: true
+                                                    action: 'open_editor_existing'
                                                 });
                                                 setIsLayoutModalOpen(false);
                                             }}
                                             className="bg-gray-800 hover:bg-gray-700 text-gray-300 py-4 rounded-2xl font-bold transition-all flex flex-col items-center justify-center gap-1 border border-gray-700"
                                         >
-                                            <span className="text-[10px] uppercase tracking-widest text-gray-500">Continuar</span>
+                                            <span className="text-[10px] uppercase tracking-widest text-gray-500">Layout actual</span>
                                             ABRIR EDITOR
                                         </button>
                                         <button
                                             onClick={() => {
-                                                // Clear and start new wireframe
-                                                onStartGeneration({ ...layoutSettings, plan_only: true });
+                                                onStartGeneration({ ...layoutSettings, action: 'reorganize_layout' });
                                                 setIsLayoutModalOpen(false);
                                             }}
                                             className="bg-gray-800 hover:bg-gray-700 text-purple-400 py-4 rounded-2xl font-bold transition-all flex flex-col items-center justify-center gap-1 border border-purple-900/50"
                                         >
-                                            <span className="text-[10px] uppercase tracking-widest text-purple-600">Nueva Escritura</span>
+                                            <span className="text-[10px] uppercase tracking-widest text-purple-600">Nueva maquetacion</span>
                                             REORGANIZAR
                                         </button>
                                     </>
                                 ) : (
                                     <button
                                         onClick={() => {
-                                            onStartGeneration({ ...layoutSettings, plan_only: true });
+                                            onStartGeneration({ ...layoutSettings, action: 'create_initial_layout' });
                                             setIsLayoutModalOpen(false);
                                         }}
                                         className="bg-gray-800 hover:bg-gray-700 text-gray-300 py-5 rounded-2xl font-bold transition-all flex flex-col items-center justify-center gap-1 border border-gray-700 col-span-1"
                                     >
-                                        <span className="text-xs uppercase tracking-widest text-gray-500">Paso 1</span>
-                                        DISEÑAR MAQUETACIÓN
+                                        <span className="text-xs uppercase tracking-widest text-gray-500">Primer paso</span>
+                                        ABRIR EDITOR
                                     </button>
                                 )}
                                 <button
                                     onClick={() => {
-                                        onStartGeneration(layoutSettings);
+                                        onStartGeneration(hasExistingLayout ? { action: 'generate_all_existing' } : { ...layoutSettings });
                                         setIsLayoutModalOpen(false);
                                     }}
                                     className="bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white py-5 rounded-2xl font-black transition-all shadow-xl shadow-purple-500/30 flex flex-col items-center justify-center gap-1 col-span-2"
                                 >
                                     <span className="text-[10px] uppercase tracking-widest text-purple-200 opacity-60">
-                                        {(project?.pages?.length > 0) ? "Borrar y Generar" : "Paso Directo"}
+                                        {hasExistingLayout ? "Usar layout guardado" : "Paso directo"}
                                     </span>
                                     <div className="flex items-center gap-2">
                                         <Zap size={16} fill="white" />

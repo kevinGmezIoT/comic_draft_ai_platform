@@ -5,7 +5,7 @@ import {
 } from 'lucide-react';
 import axios from 'axios';
 
-const ProjectWizard = ({ onComplete }) => {
+const ProjectWizard = ({ onComplete, onCancel }) => {
     const [step, setStep] = useState(1);
     const [loading, setLoading] = useState(false);
     const [projectData, setProjectData] = useState({
@@ -117,10 +117,21 @@ const ProjectWizard = ({ onComplete }) => {
         <div className="w-full max-w-4xl bg-gray-900 border border-gray-800 rounded-3xl overflow-hidden shadow-2xl animate-in fade-in zoom-in duration-500">
             {/* Header / Stepper */}
             <div className="bg-gray-800/50 p-8 border-b border-gray-800">
-                <div className="flex justify-between items-center mb-8">
-                    <div>
-                        <h2 className="text-2xl font-bold text-white">Nuevo Proyecto de Cómic</h2>
-                        <p className="text-gray-400 text-sm mt-1">Configura las bases de tu historia</p>
+                <div className="flex justify-between items-center mb-8 gap-4">
+                    <div className="flex items-center gap-4">
+                        <button
+                            type="button"
+                            onClick={onCancel}
+                            disabled={loading}
+                            className="flex items-center gap-2 rounded-xl border border-gray-700 bg-gray-900 px-4 py-2 text-sm font-bold text-gray-300 transition-all hover:border-gray-600 hover:text-white disabled:opacity-50"
+                        >
+                            <ChevronLeft size={16} />
+                            Volver al inicio
+                        </button>
+                        <div>
+                            <h2 className="text-2xl font-bold text-white">Nuevo Proyecto de Cómic</h2>
+                            <p className="text-gray-400 text-sm mt-1">Configura las bases de tu historia</p>
+                        </div>
                     </div>
                     <div className="flex gap-2">
                         {[1, 2, 3, 4, 5].map(s => (
