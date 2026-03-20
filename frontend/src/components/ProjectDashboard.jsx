@@ -7,6 +7,19 @@ import {
 } from 'lucide-react';
 import axios from 'axios';
 
+const getFileNameFromUrl = (url = '') => {
+    if (!url) return '';
+    try {
+        return decodeURIComponent(url.split('/').pop().split('?')[0]);
+    } catch {
+        return url;
+    }
+};
+
+const isImageFile = (url = '') => /\.(png|jpe?g|gif|webp|bmp|svg)(\?|$)/i.test(url);
+const isPdfFile = (url = '') => /\.pdf(\?|$)/i.test(url);
+const isTextFile = (url = '') => /\.(txt|md|json|csv)(\?|$)/i.test(url);
+
 const ProjectDashboard = ({ projectId, onStartGeneration }) => {
     const [project, setProject] = useState(null);
     const [loading, setLoading] = useState(true);
@@ -19,6 +32,7 @@ const ProjectDashboard = ({ projectId, onStartGeneration }) => {
         panels_per_page: 6,
         layout_style: 'dynamic'
     });
+    const [scriptViewerOpen, setScriptViewerOpen] = useState(false);
 
     // Synchronize layout settings with project data when available
     useEffect(() => {
@@ -136,6 +150,12 @@ const ProjectDashboard = ({ projectId, onStartGeneration }) => {
             <button onClick={fetchProject} className="mt-4 text-purple-400 hover:text-purple-300 underline font-bold">Reintentar</button>
         </div>
     );
+
+    const hasExistingLayout = (project?.pages?.length || 0) > 0;
+    const scriptNote = project.notes?.find(note => note.note_type === 'script') || null;
+    const importantNotes = project.notes?.filter(note => note.note_type !== 'script') || [];
+    const scriptFileName = getFileNameFromUrl(scriptNote?.file_url) || scriptNote?.title || 'Sin archivo';
+    const canPreviewInline = scriptNote?.file_url && (isPdfFile(scriptNote.file_url) || isImageFile(scriptNote.file_url) || isTextFile(scriptNote.file_url));
 
     return (
         <div className="w-full max-w-6xl space-y-12 animate-in fade-in duration-500 pb-20 px-4">
@@ -324,12 +344,46 @@ const ProjectDashboard = ({ projectId, onStartGeneration }) => {
                             <FileText size={18} className="text-purple-400" />
                             Guión Maestro
                         </h3>
-                        <div className="bg-gray-950 rounded-2xl p-8 border border-gray-800 text-center group cursor-pointer hover:border-purple-600/50 transition-all">
-                            <div className="w-16 h-16 bg-gray-900 rounded-xl flex items-center justify-center mx-auto mb-4 group-hover:scale-110 transition-transform">
-                                <FileText size={32} className="text-gray-600 group-hover:text-purple-400" />
-                            </div>
-                            <p className="text-white font-bold mb-1">guion_principal.pdf</p>
-                            <p className="text-[10px] text-gray-500 uppercase font-black">Reemplazar Archivo</p>
+                        <div className="bg-gray-950 rounded-2xl p-8 border border-gray-800 text-center group hover:border-purple-600/50 transition-all">
+                            <button
+                                type="button"
+                                onClick={() => scriptNote && setScriptViewerOpen(true)}
+                                className="w-full"
+                                disabled={!scriptNote}
+                            >
+                                <div className="w-16 h-16 bg-gray-900 rounded-xl flex items-center justify-center mx-auto mb-4 group-hover:scale-110 transition-transform">
+                                    <FileText size={32} className="text-gray-600 group-hover:text-purple-400" />
+                                </div>
+                                <p className="text-white font-bold mb-1 break-all">{scriptFileName}</p>
+                                <p className="text-[10px] text-gray-500 uppercase font-black">
+                                    {scriptNote ? 'Abrir y visualizar contenido' : 'No hay archivo cargado'}
+                                </p>
+                            </button>
+                            {scriptNote?.content && (
+                                <div className="mt-5 rounded-xl border border-gray-800/80 bg-gray-900/50 p-4 text-left">
+                                    <p className="text-[10px] text-purple-400 uppercase tracking-[0.2em] font-black mb-2">Resumen</p>
+                                    <p className="text-xs text-gray-300 whitespace-pre-wrap line-clamp-4">{scriptNote.content}</p>
+                                </div>
+                            )}
+                            {scriptNote?.file_url && (
+                                <div className="mt-5 flex gap-3">
+                                    <button
+                                        type="button"
+                                        onClick={() => setScriptViewerOpen(true)}
+                                        className="flex-1 rounded-xl bg-purple-600 hover:bg-purple-500 text-white px-4 py-3 text-xs font-black uppercase tracking-wider transition-all"
+                                    >
+                                        Ver guion
+                                    </button>
+                                    <a
+                                        href={scriptNote.file_url}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="flex-1 rounded-xl border border-gray-700 hover:border-gray-600 text-gray-300 px-4 py-3 text-xs font-black uppercase tracking-wider transition-all text-center"
+                                    >
+                                        Abrir archivo
+                                    </a>
+                                </div>
+                            )}
                         </div>
                     </div>
 
@@ -348,7 +402,7 @@ const ProjectDashboard = ({ projectId, onStartGeneration }) => {
                             </button>
                         </div>
                         <div className="space-y-4">
-                            {project.notes?.map(note => (
+                            {importantNotes.length > 0 ? importantNotes.map(note => (
                                 <div key={note.id} className="bg-gray-950/50 p-5 rounded-2xl border border-gray-800/50 hover:border-yellow-500/30 transition-all group">
                                     <div className="flex justify-between items-start mb-2">
                                         <h5 className="font-bold text-gray-200 text-sm">{note.title}</h5>
@@ -361,11 +415,69 @@ const ProjectDashboard = ({ projectId, onStartGeneration }) => {
                                         </div>
                                     )}
                                 </div>
-                            )) || <p className="text-xs text-gray-600 italic text-center">Sin notas relevantes.</p>}
+                            )) : <p className="text-xs text-gray-600 italic text-center">Sin notas relevantes.</p>}
                         </div>
                     </div>
                 </div>
             </div>
+
+            {scriptViewerOpen && scriptNote && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 md:p-6 animate-in fade-in duration-200">
+                    <div className="absolute inset-0 bg-black/85 backdrop-blur-sm" onClick={() => setScriptViewerOpen(false)}></div>
+                    <div className="bg-gray-900 border border-gray-800 w-full max-w-5xl rounded-3xl p-6 md:p-8 relative z-10 shadow-2xl animate-in zoom-in-95 duration-200 max-h-[90vh] overflow-hidden flex flex-col">
+                        <div className="flex justify-between items-start gap-4 mb-6">
+                            <div className="min-w-0">
+                                <h3 className="text-2xl font-black text-white break-all">{scriptNote.title || 'Guion Maestro'}</h3>
+                                <p className="text-xs text-gray-500 font-bold uppercase tracking-widest mt-1">{scriptFileName}</p>
+                            </div>
+                            <button onClick={() => setScriptViewerOpen(false)} className="text-gray-500 hover:text-white transition-colors shrink-0">
+                                <X size={24} />
+                            </button>
+                        </div>
+
+                        <div className="flex-1 min-h-0 overflow-auto rounded-2xl border border-gray-800 bg-gray-950">
+                            {scriptNote.content && (
+                                <div className="p-6 border-b border-gray-800">
+                                    <p className="text-[10px] text-purple-400 uppercase tracking-[0.2em] font-black mb-3">Contenido</p>
+                                    <div className="text-sm text-gray-200 whitespace-pre-wrap leading-relaxed">{scriptNote.content}</div>
+                                </div>
+                            )}
+
+                            {scriptNote.file_url && canPreviewInline && (
+                                <div className="p-4 md:p-6">
+                                    {isImageFile(scriptNote.file_url) ? (
+                                        <img src={scriptNote.file_url} alt={scriptNote.title || 'Guion maestro'} className="w-full h-auto rounded-xl border border-gray-800" />
+                                    ) : (
+                                        <iframe
+                                            src={scriptNote.file_url}
+                                            title={scriptNote.title || 'Guion maestro'}
+                                            className="w-full min-h-[60vh] rounded-xl border border-gray-800 bg-white"
+                                        />
+                                    )}
+                                </div>
+                            )}
+
+                            {scriptNote.file_url && !canPreviewInline && (
+                                <div className="p-6">
+                                    <p className="text-sm text-gray-400 mb-4">Este tipo de archivo no se puede previsualizar dentro de la app.</p>
+                                    <a
+                                        href={scriptNote.file_url}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="inline-flex items-center justify-center rounded-xl bg-purple-600 hover:bg-purple-500 text-white px-5 py-3 text-xs font-black uppercase tracking-wider transition-all"
+                                    >
+                                        Abrir archivo
+                                    </a>
+                                </div>
+                            )}
+
+                            {!scriptNote.content && !scriptNote.file_url && (
+                                <div className="p-6 text-sm text-gray-500">Este guion no tiene contenido disponible todavia.</div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* Global Modal Component */}
             {modal.open && (
@@ -399,7 +511,11 @@ const ProjectDashboard = ({ projectId, onStartGeneration }) => {
                         <div className="flex justify-between items-center mb-8">
                             <div>
                                 <h3 className="text-3xl font-black text-white uppercase tracking-tight">Preferencias de Maquetación</h3>
-                                <p className="text-gray-500 text-xs font-bold uppercase tracking-widest mt-1">Configura antes de generar</p>
+                                <p className="text-gray-500 text-xs font-bold uppercase tracking-widest mt-1">
+                                    {hasExistingLayout
+                                        ? 'Abrir editor conserva el layout actual; Reorganizar aplica estas opciones.'
+                                        : 'Configura y abre el editor para crear la maquetacion inicial.'}
+                                </p>
                             </div>
                             <button onClick={() => setIsLayoutModalOpen(false)} className="text-gray-500 hover:text-white transition-colors">
                                 <X size={24} />
@@ -460,57 +576,52 @@ const ProjectDashboard = ({ projectId, onStartGeneration }) => {
                             </div>
 
                             <div className="grid grid-cols-2 gap-4 mt-4">
-                                {(project?.pages?.length > 0) ? (
+                                {hasExistingLayout ? (
                                     <>
                                         <button
                                             onClick={() => {
-                                                // Sync settings but skip agent to just open the editor
                                                 onStartGeneration({
-                                                    max_pages: project.max_pages,
-                                                    layout_style: project.layout_style,
-                                                    plan_only: true,
-                                                    skip_agent: true
+                                                    action: 'open_editor_existing'
                                                 });
                                                 setIsLayoutModalOpen(false);
                                             }}
                                             className="bg-gray-800 hover:bg-gray-700 text-gray-300 py-4 rounded-2xl font-bold transition-all flex flex-col items-center justify-center gap-1 border border-gray-700"
                                         >
-                                            <span className="text-[10px] uppercase tracking-widest text-gray-500">Continuar</span>
+                                            <span className="text-[10px] uppercase tracking-widest text-gray-500">Layout actual</span>
                                             ABRIR EDITOR
                                         </button>
                                         <button
                                             onClick={() => {
-                                                // Clear and start new wireframe
-                                                onStartGeneration({ ...layoutSettings, plan_only: true });
+                                                onStartGeneration({ ...layoutSettings, action: 'reorganize_layout' });
                                                 setIsLayoutModalOpen(false);
                                             }}
                                             className="bg-gray-800 hover:bg-gray-700 text-purple-400 py-4 rounded-2xl font-bold transition-all flex flex-col items-center justify-center gap-1 border border-purple-900/50"
                                         >
-                                            <span className="text-[10px] uppercase tracking-widest text-purple-600">Nueva Escritura</span>
+                                            <span className="text-[10px] uppercase tracking-widest text-purple-600">Nueva maquetacion</span>
                                             REORGANIZAR
                                         </button>
                                     </>
                                 ) : (
                                     <button
                                         onClick={() => {
-                                            onStartGeneration({ ...layoutSettings, plan_only: true });
+                                            onStartGeneration({ ...layoutSettings, action: 'create_initial_layout' });
                                             setIsLayoutModalOpen(false);
                                         }}
                                         className="bg-gray-800 hover:bg-gray-700 text-gray-300 py-5 rounded-2xl font-bold transition-all flex flex-col items-center justify-center gap-1 border border-gray-700 col-span-1"
                                     >
-                                        <span className="text-xs uppercase tracking-widest text-gray-500">Paso 1</span>
-                                        DISEÑAR MAQUETACIÓN
+                                        <span className="text-xs uppercase tracking-widest text-gray-500">Primer paso</span>
+                                        ABRIR EDITOR
                                     </button>
                                 )}
                                 <button
                                     onClick={() => {
-                                        onStartGeneration(layoutSettings);
+                                        onStartGeneration(hasExistingLayout ? { action: 'generate_all_existing' } : { ...layoutSettings });
                                         setIsLayoutModalOpen(false);
                                     }}
                                     className="bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white py-5 rounded-2xl font-black transition-all shadow-xl shadow-purple-500/30 flex flex-col items-center justify-center gap-1 col-span-2"
                                 >
                                     <span className="text-[10px] uppercase tracking-widest text-purple-200 opacity-60">
-                                        {(project?.pages?.length > 0) ? "Borrar y Generar" : "Paso Directo"}
+                                        {hasExistingLayout ? "Usar layout guardado" : "Paso directo"}
                                     </span>
                                     <div className="flex items-center gap-2">
                                         <Zap size={16} fill="white" />
