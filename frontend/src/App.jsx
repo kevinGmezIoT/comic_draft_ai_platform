@@ -8,6 +8,16 @@ import {
 } from 'lucide-react';
 import axios from 'axios';
 
+const getMediaCacheKey = (url) => {
+    if (!url) return '';
+    try {
+        const parsed = new URL(url, window.location.origin);
+        return `${parsed.origin}${parsed.pathname}`;
+    } catch {
+        return url.split('?')[0];
+    }
+};
+
 function App() {
     const [view, setView] = useState('dashboard'); // 'wizard' | 'dashboard' | 'editor'
     const [loading, setLoading] = useState(false);
@@ -53,7 +63,34 @@ function App() {
     const pollingInterval = React.useRef(null);
     const [pollingRetryCount, setPollingRetryCount] = useState(0);
     const panelsRef = useRef(panels);
+    const mediaUrlCacheRef = useRef(new Map());
     React.useEffect(() => { panelsRef.current = panels; }, [panels]);
+
+    const stabilizeMediaUrl = React.useCallback((url) => {
+        if (!url) return url;
+        const cacheKey = getMediaCacheKey(url);
+        const cachedUrl = mediaUrlCacheRef.current.get(cacheKey);
+        if (cachedUrl) return cachedUrl;
+        mediaUrlCacheRef.current.set(cacheKey, url);
+        return url;
+    }, []);
+
+    const normalizeProjectMedia = React.useCallback((projectData) => {
+        if (!projectData?.pages) return projectData;
+
+        return {
+            ...projectData,
+            pages: projectData.pages.map((page) => ({
+                ...page,
+                merged_image_url: stabilizeMediaUrl(page.merged_image_url),
+                panels: (page.panels || []).map((panel) => ({
+                    ...panel,
+                    image_url: stabilizeMediaUrl(panel.image_url),
+                    reference_image: stabilizeMediaUrl(panel.reference_image)
+                }))
+            }))
+        };
+    }, [stabilizeMediaUrl]);
 
     const fetchProjects = async () => {
         try {
@@ -71,17 +108,18 @@ function App() {
         if (!projectId) return;
         try {
             const response = await axios.get(`${import.meta.env.VITE_API_URL}/projects/${projectId}/`);
-            if (response.data.pages) {
-                setPages(response.data.pages);
-                const allPanels = response.data.pages.flatMap(p => p.panels);
+            const normalizedProject = normalizeProjectMedia(response.data);
+            if (normalizedProject.pages) {
+                setPages(normalizedProject.pages);
+                const allPanels = normalizedProject.pages.flatMap(p => p.panels);
                 setPanels(allPanels);
 
                 // Priorizar estados oficiales del backend para la visualización activa
-                const backendMaxPages = response.data.max_pages || response.data.pages.length || 3;
-                const backendMaxPanels = response.data.max_panels || allPanels.length || 6;
-                const actualMaxPanelsPerPage = response.data.pages.reduce((max, p) => Math.max(max, p.panels.length), 0) || 4;
+                const backendMaxPages = normalizedProject.max_pages || normalizedProject.pages.length || 3;
+                const backendMaxPanels = normalizedProject.max_panels || allPanels.length || 6;
+                const actualMaxPanelsPerPage = normalizedProject.pages.reduce((max, p) => Math.max(max, p.panels.length), 0) || 4;
 
-                const isBackendBusy = response.data.status === 'processing' || response.data.status === 'queued' || response.data.status === 'generating';
+                const isBackendBusy = normalizedProject.status === 'processing' || normalizedProject.status === 'queued' || normalizedProject.status === 'generating';
 
                 // Solo actualizamos la estructura del proyecto si:
                 // 1. No estamos en medio de una generación local (según el Ref)
@@ -91,7 +129,7 @@ function App() {
                     setMaxPages(backendMaxPages);
                     setMaxPanels(backendMaxPanels);
                     setMaxPanelsPerPage(actualMaxPanelsPerPage);
-                    setLayoutStyle(response.data.layout_style || 'dynamic');
+                    setLayoutStyle(normalizedProject.layout_style || 'dynamic');
                 }
             }
         } catch (error) {
@@ -389,9 +427,10 @@ function App() {
 
             try {
                 const response = await axios.get(`${import.meta.env.VITE_API_URL}/projects/${projectId}/`);
+                const normalizedProject = normalizeProjectMedia(response.data);
 
-                if (response.data.status === 'failed') {
-                    setError(response.data.last_error);
+                if (normalizedProject.status === 'failed') {
+                    setError(normalizedProject.last_error);
                     setLoading(false);
                     isGeneratingRef.current = false;
                     setRegenerating(false);
@@ -399,10 +438,10 @@ function App() {
                         clearInterval(pollingInterval.current);
                         pollingInterval.current = null;
                     }
-                } else if (response.data.status === 'completed') {
-                    if (response.data.pages && response.data.pages.length > 0) {
-                        setPages(response.data.pages);
-                        const allPanels = response.data.pages.flatMap(p => p.panels);
+                } else if (normalizedProject.status === 'completed') {
+                    if (normalizedProject.pages && normalizedProject.pages.length > 0) {
+                        setPages(normalizedProject.pages);
+                        const allPanels = normalizedProject.pages.flatMap(p => p.panels);
                         setPanels(allPanels);
                         if (selectedPanel) {
                             const updated = allPanels.find(p => p.id === selectedPanel.id);

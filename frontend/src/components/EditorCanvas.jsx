@@ -1,6 +1,75 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { Stage, Layer, Rect, Image, Text, Group, Transformer } from 'react-konva';
-import useImage from 'use-image';
+
+const imageCache = new Map();
+
+const loadCachedImage = (src) => {
+  if (!src) return Promise.resolve(null);
+
+  const cached = imageCache.get(src);
+  if (cached?.status === 'loaded') {
+    return Promise.resolve(cached.image);
+  }
+  if (cached?.promise) {
+    return cached.promise;
+  }
+
+  const image = new window.Image();
+  image.decoding = 'async';
+
+  const promise = new Promise((resolve, reject) => {
+    image.onload = () => {
+      imageCache.set(src, { status: 'loaded', image });
+      resolve(image);
+    };
+    image.onerror = (error) => {
+      imageCache.delete(src);
+      reject(error);
+    };
+  });
+
+  imageCache.set(src, { status: 'loading', promise });
+  image.src = src;
+
+  return promise;
+};
+
+const useCachedImage = (src) => {
+  const [image, setImage] = useState(() => imageCache.get(src)?.image || null);
+
+  useEffect(() => {
+    let isActive = true;
+
+    if (!src) {
+      setImage(null);
+      return () => {
+        isActive = false;
+      };
+    }
+
+    const cached = imageCache.get(src);
+    if (cached?.status === 'loaded') {
+      setImage(cached.image);
+      return () => {
+        isActive = false;
+      };
+    }
+
+    loadCachedImage(src)
+      .then((loadedImage) => {
+        if (isActive) setImage(loadedImage);
+      })
+      .catch(() => {
+        if (isActive) setImage(null);
+      });
+
+    return () => {
+      isActive = false;
+    };
+  }, [src]);
+
+  return image;
+};
 
 const Balloon = ({ balloon, index, x, y, width, height, fontSize, panelWidth, panelHeight, isSelected, onSelect, onChange, onDelete }) => {
   const isNarration = balloon.type === "narration";
@@ -140,7 +209,7 @@ const PanelImage = ({
   panel, x, y, width, height, isSelected, onSelect, onLayoutChange,
   selectedBalloonKey, onSelectBalloon, onBalloonChange, onDeleteBalloon, onSelectPanel
 }) => {
-  const [image] = useImage(panel.image_url);
+  const image = useCachedImage(panel.image_url);
   const shapeRef = useRef();
 
   return (
@@ -253,6 +322,28 @@ const PanelImage = ({
   );
 };
 
+const MemoizedPanelImage = React.memo(PanelImage, (prevProps, nextProps) => {
+  const prevLayout = JSON.stringify(prevProps.panel.layout || {});
+  const nextLayout = JSON.stringify(nextProps.panel.layout || {});
+  const prevBalloons = JSON.stringify(prevProps.panel.balloons || []);
+  const nextBalloons = JSON.stringify(nextProps.panel.balloons || []);
+
+  return (
+    prevProps.panel.id === nextProps.panel.id &&
+    prevProps.panel.image_url === nextProps.panel.image_url &&
+    prevProps.panel.order === nextProps.panel.order &&
+    prevProps.panel.status === nextProps.panel.status &&
+    prevLayout === nextLayout &&
+    prevBalloons === nextBalloons &&
+    prevProps.x === nextProps.x &&
+    prevProps.y === nextProps.y &&
+    prevProps.width === nextProps.width &&
+    prevProps.height === nextProps.height &&
+    prevProps.isSelected === nextProps.isSelected &&
+    prevProps.selectedBalloonKey === nextProps.selectedBalloonKey
+  );
+});
+
 const EditorCanvas = ({ panels, onSelectPanel, selectedId, onUpdateLayout, currentPage, dimensions, onDeletePanel, onBalloonChange, onDeleteBalloon }) => {
   const CANVAS_WIDTH = dimensions?.w || 800;
   const PAGE_HEIGHT = dimensions?.h || 1100;
@@ -261,7 +352,18 @@ const EditorCanvas = ({ panels, onSelectPanel, selectedId, onUpdateLayout, curre
   const [selectedBalloonKey, setSelectedBalloonKey] = useState(null);
 
   // Filter panels to only show the ones for the current page
-  const pagePanels = panels.filter(p => p.page_number === currentPage);
+  const pagePanels = useMemo(
+    () => panels.filter(p => p.page_number === currentPage),
+    [panels, currentPage]
+  );
+
+  useEffect(() => {
+    pagePanels.forEach((panel) => {
+      if (panel.image_url) {
+        loadCachedImage(panel.image_url).catch(() => null);
+      }
+    });
+  }, [pagePanels]);
 
   useEffect(() => {
     const handleKeyDown = (e) => {
@@ -332,7 +434,7 @@ const EditorCanvas = ({ panels, onSelectPanel, selectedId, onUpdateLayout, curre
               const height = (layout.h || 30) / 100 * (PAGE_HEIGHT - 40);
 
               return (
-                <PanelImage
+                <MemoizedPanelImage
                   key={panel.id}
                   panel={panel}
                   x={x} y={y}
