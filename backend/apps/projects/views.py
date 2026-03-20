@@ -730,6 +730,8 @@ class RegenerateMergedPagesView(APIView):
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 class ProjectNoteView(APIView):
+    parser_classes = (parsers.MultiPartParser, parsers.FormParser, parsers.JSONParser)
+
     def post(self, request, project_id):
         try:
             project = Project.objects.get(id=project_id)
@@ -739,7 +741,10 @@ class ProjectNoteView(APIView):
                 content=request.data.get('content', ''),
                 note_type=request.data.get('note_type', 'general')
             )
-            if request.data.get('file_url'):
+            uploaded_file = request.FILES.get('file')
+            if uploaded_file:
+                note.file = uploaded_file
+            elif request.data.get('file_url'):
                 note.file.name = request.data.get('file_url')
             elif request.data.get('file_path'):
                  note.file.name = request.data.get('file_path')
@@ -749,12 +754,17 @@ class ProjectNoteView(APIView):
             return Response({"error": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
 
 class ProjectNoteDetailView(APIView):
+    parser_classes = (parsers.MultiPartParser, parsers.FormParser, parsers.JSONParser)
+
     def patch(self, request, note_id):
         try:
             note = ProjectNote.objects.get(id=note_id)
             note.title = request.data.get('title', note.title)
             note.content = request.data.get('content', note.content)
-            if 'file_url' in request.data:
+            uploaded_file = request.FILES.get('file')
+            if uploaded_file:
+                note.file = uploaded_file
+            elif 'file_url' in request.data:
                 note.file.name = request.data.get('file_url')
             elif 'file_path' in request.data:
                 note.file.name = request.data.get('file_path')
