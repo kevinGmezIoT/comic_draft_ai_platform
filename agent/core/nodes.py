@@ -1,7 +1,9 @@
 import os
 import json
 import base64
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional
+from langsmith import traceable
 from langchain_openai import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -10,7 +12,9 @@ from .knowledge import KnowledgeManager, CharacterManager, StyleManager, Scenery
 from .prompts import PromptBuilder
 from .supervisor import ContinuitySupervisor
 from .adapters import get_image_adapter
+from .telemetry import submit_with_current_context, timed_function, timed_step
 
+@timed_function("node.ingest_and_rag")
 def ingest_and_rag(state: AgentState):
     print("--- RAG & INGESTION ---")
     km = KnowledgeManager(state["project_id"])
@@ -79,6 +83,7 @@ def ingest_and_rag(state: AgentState):
         "reference_images": image_paths
     }
 
+@timed_function("node.story_understanding")
 def story_understanding(state: AgentState):
     """Story Understanding Node: Reads the full script in batches and extracts
     1. Detailed page summaries (heuristic analysis)
@@ -93,44 +98,20 @@ def story_understanding(state: AgentState):
     # ── Step 1: Obtain raw pages from the PDF (or fallback to text chunks) ──
     raw_pages: Dict[int, str] = {}  # page_number -> text content
     
+    km = KnowledgeManager(project_id)
+
     # Try to load pages directly from the PDF source for page-level fidelity
     pdf_loaded = False
     for url in sources:
         ext = os.path.splitext(url.split('?')[0])[1].lower()
         if ext == '.pdf':
             try:
-                km = KnowledgeManager(project_id)
-                if url.startswith("s3://"):
-                    local_path = km._download_from_s3(url)
-                elif url.startswith("http"):
-                    from urllib.parse import urlparse
-                    parsed = urlparse(url)
-                    hostname = parsed.netloc
-                    if hostname.endswith(".amazonaws.com"):
-                        parts = hostname.split('.')
-                        if "s3" in parts:
-                            bucket_name = parts[0]
-                            key = parsed.path.lstrip('/')
-                            s3_uri = f"s3://{bucket_name}/{key}"
-                            local_path = km._download_from_s3(s3_uri)
-                        else:
-                            continue
-                    else:
-                        import requests as req
-                        temp_dir = "./data/temp_downloads"
-                        os.makedirs(temp_dir, exist_ok=True)
-                        local_path = os.path.join(temp_dir, os.path.basename(parsed.path))
-                        r = req.get(url, stream=True, timeout=60)
-                        r.raise_for_status()
-                        with open(local_path, 'wb') as f:
-                            for chunk in r.iter_content(chunk_size=8192):
-                                f.write(chunk)
-                else:
-                    local_path = url
+                local_path = km.resolve_to_local_path(url)
                 
                 from langchain_community.document_loaders import PyPDFLoader
-                loader = PyPDFLoader(local_path)
-                pages = loader.load()
+                with timed_step("story_understanding.load_pdf_pages"):
+                    loader = PyPDFLoader(local_path)
+                    pages = loader.load()
                 for doc in pages:
                     pg = doc.metadata.get("page", 0) + 1  # 1-indexed
                     raw_pages[pg] = doc.page_content
@@ -167,6 +148,164 @@ def story_understanding(state: AgentState):
     panel_purposes: Dict[str, str] = {}  # key: "page_{n}_panel_{m}" -> purpose
     
     sorted_page_nums = sorted(raw_pages.keys())
+
+    enable_parallel_story = os.getenv("ENABLE_PARALLEL_STORY", "1").strip().lower() not in {"0", "false", "no", "off"}
+    max_story_workers = max(1, int(os.getenv("STORY_BATCH_CONCURRENCY", "2")))
+
+    if enable_parallel_story and len(sorted_page_nums) > BATCH_SIZE and max_story_workers > 1:
+        print(f"DEBUG: [StoryUnderstanding] Parallel batch mode enabled with {min(max_story_workers, len(sorted_page_nums))} workers.")
+
+        def process_story_batch(batch_page_nums: List[int]) -> Dict[str, object]:
+            batch_llm = ChatOpenAI(model=os.getenv("OPENAI_MODEL_ID"), temperature=0)
+            batch_text = ""
+            for pg in batch_page_nums:
+                batch_text += f"\n{raw_pages[pg]}"
+
+            print(f"DEBUG: [StoryUnderstanding] Processing batch: pages {batch_page_nums[0]}-{batch_page_nums[-1]} ({len(batch_text)} chars)")
+
+            prompt = f"""
+            ActÃºa como un Analista de Guiones de CÃ³mic experto.
+            
+            Tu tarea es leer el siguiente fragmento de guiÃ³n y producir DOS tipos de anÃ¡lisis:
+            
+            ### 1. RESUMEN DETALLADO POR PÃGINA DE GUIÃ“N
+            Para cada pÃ¡gina del guion de cÃ³mic identificada en el fragmento, genera un resumen visual detallado que describa:
+            - QuÃ© sucede narrativamente (acciÃ³n, diÃ¡logo clave, progresiÃ³n dramÃ¡tica).
+            - El tono emocional dominante (tensiÃ³n, calma, humor, misterio, etc.).
+            - Los elementos visuales clave que un artista necesitarÃ­a saber.
+            - Transiciones importantes respecto a la pÃ¡gina anterior (si aplica).
+            
+            ### 2. PROPÃ“SITO SUBYACENTE DE CADA VIÃ‘ETA/PANEL
+            Identifica cada viÃ±eta o panel descrito en el guiÃ³n y asÃ­gnale un "propÃ³sito subyacente":
+            - Â¿CuÃ¡l es la intenciÃ³n narrativa de esta viÃ±eta? (ej: "Establecer la soledad del personaje",
+              "Mostrar la magnitud del escenario", "Revelar un giro argumental", "Generar tensiÃ³n antes del clÃ­max").
+            - Â¿QuÃ© emociÃ³n debe evocar en el lector?
+            - Â¿QuÃ© elemento visual es el foco principal?
+            
+            TEXTO DEL GUIÃ“N:
+            {batch_text}
+            
+            Responde ÃšNICAMENTE en JSON con esta estructura:
+            {{
+                "page_summaries": {{
+                    "<nÃºmero_de_pÃ¡gina>": "Resumen detallado de la pÃ¡gina..."
+                }},
+                "panel_purposes": {{
+                    "page_<N>_panel_<M>": "PropÃ³sito subyacente: ..."
+                }}
+            }}
+            
+            REGLAS:
+            - Para panel_purposes, usa la convenciÃ³n "page_N_panel_M" donde N es el nÃºmero de pÃ¡gina y M empieza en 1.
+            - Si una pÃ¡gina no tiene viÃ±etas claramente definidas, trata toda la pÃ¡gina como un solo panel.
+            - SÃ© preciso y detallado en los resÃºmenes. Un buen resumen tiene 3-5 oraciones.
+            - Los propÃ³sitos deben ser concisos (1-2 oraciones) pero especÃ­ficos.
+            """
+
+            prompt = f"""
+            Actua como un Analista de Guiones de Comic experto.
+
+            Tu tarea es leer el siguiente fragmento de guion y producir DOS tipos de analisis:
+
+            1. RESUMEN DETALLADO POR PAGINA DE GUION
+            Para cada pagina del guion de comic identificada en el fragmento, genera un resumen visual detallado que describa:
+            - Que sucede narrativamente (accion, dialogo clave, progresion dramatica).
+            - El tono emocional dominante (tension, calma, humor, misterio, etc.).
+            - Los elementos visuales clave que un artista necesitaria saber.
+            - Transiciones importantes respecto a la pagina anterior (si aplica).
+
+            2. PROPOSITO SUBYACENTE DE CADA VINETA/PANEL
+            Identifica cada vineta o panel descrito en el guion y asignale un proposito subyacente:
+            - Cual es la intencion narrativa de esta vineta?
+            - Que emocion debe evocar en el lector?
+            - Que elemento visual es el foco principal?
+
+            TEXTO DEL GUION:
+            {batch_text}
+
+            Responde UNICAMENTE en JSON con esta estructura:
+            {{
+                "page_summaries": {{
+                    "<numero_de_pagina>": "Resumen detallado de la pagina..."
+                }},
+                "panel_purposes": {{
+                    "page_<N>_panel_<M>": "Proposito subyacente: ..."
+                }}
+            }}
+
+            REGLAS:
+            - Para panel_purposes, usa la convencion "page_N_panel_M" donde N es el numero de pagina y M empieza en 1.
+            - Si una pagina no tiene vinetas claramente definidas, trata toda la pagina como un solo panel.
+            - Se preciso y detallado en los resumenes. Un buen resumen tiene 3-5 oraciones.
+            - Los propositos deben ser concisos (1-2 oraciones) pero especificos.
+            """
+
+            try:
+                with timed_step(f"story_understanding.batch_llm[{batch_page_nums[0]}-{batch_page_nums[-1]}]"):
+                    response = batch_llm.invoke([
+                        SystemMessage(content="Eres un analista experto de guiones de cÃ³mic. Responde siempre en JSON vÃ¡lido."),
+                        HumanMessage(content=prompt)
+                    ])
+
+                content = response.content.strip()
+                if "```json" in content:
+                    content = content.split("```json")[1].split("```")[0].strip()
+                elif "```" in content:
+                    content = content.split("```")[1].split("```")[0].strip()
+
+                batch_data = json.loads(content)
+                return {
+                    "batch_page_nums": batch_page_nums,
+                    "page_summaries": batch_data.get("page_summaries", {}),
+                    "panel_purposes": batch_data.get("panel_purposes", {})
+                }
+            except Exception as e:
+                print(f"ERROR: [StoryUnderstanding] Batch {batch_page_nums[0]}-{batch_page_nums[-1]} failed: {e}")
+                fallback_summaries = {}
+                for pg in batch_page_nums:
+                    fallback_summaries[pg] = raw_pages[pg][:500] + "..." if len(raw_pages[pg]) > 500 else raw_pages[pg]
+                return {
+                    "batch_page_nums": batch_page_nums,
+                    "page_summaries": fallback_summaries,
+                    "panel_purposes": {}
+                }
+
+        story_batches = [
+            sorted_page_nums[batch_start:batch_start + BATCH_SIZE]
+            for batch_start in range(0, len(sorted_page_nums), BATCH_SIZE)
+        ]
+        batch_results: List[Dict[str, object]] = []
+
+        with ThreadPoolExecutor(max_workers=min(max_story_workers, len(story_batches)), thread_name_prefix="story-batch") as executor:
+            future_map = {
+                submit_with_current_context(executor, process_story_batch, batch_page_nums): batch_page_nums
+                for batch_page_nums in story_batches
+            }
+            for future in as_completed(future_map):
+                batch_results.append(future.result())
+
+        for batch_result in sorted(batch_results, key=lambda item: item["batch_page_nums"][0]):
+            for pg_str, summary in batch_result.get("page_summaries", {}).items():
+                try:
+                    page_summaries[int(pg_str)] = summary
+                except (ValueError, TypeError):
+                    page_summaries[pg_str] = summary
+
+            panel_purposes.update(batch_result.get("panel_purposes", {}))
+            print(f"DEBUG: [StoryUnderstanding] Batch done. Summaries so far: {len(page_summaries)}, Purposes so far: {len(panel_purposes)}")
+
+        ordered_full_script = ""
+        for pg in sorted(raw_pages.keys()):
+            ordered_full_script += f"\n{raw_pages[pg]}"
+
+        print(f"DEBUG: [StoryUnderstanding] Complete (parallel). {len(page_summaries)} page summaries, {len(panel_purposes)} panel purposes extracted. full_script reordered ({len(ordered_full_script)} chars).")
+
+        return {
+            "current_step": "world_model_builder",
+            "page_summaries": page_summaries,
+            "panel_purposes": panel_purposes,
+            "full_script": ordered_full_script.strip()
+        }
     
     for batch_start in range(0, len(sorted_page_nums), BATCH_SIZE):
         batch_page_nums = sorted_page_nums[batch_start:batch_start + BATCH_SIZE]
@@ -262,9 +401,13 @@ def story_understanding(state: AgentState):
         "full_script": ordered_full_script.strip()
     }
 
+@timed_function("node.world_model_builder")
 def world_model_builder(state: AgentState):
     print("--- WORLD MODEL BUILDING (Characters & Scenarios) ---")
     canon = CanonicalStore(state["project_id"])
+    batch_canon_save = os.getenv("ENABLE_BATCH_CANON_SAVE", "1").strip().lower() not in {"0", "false", "no", "off"}
+    if batch_canon_save:
+        canon.autosave = False
     cm = CharacterManager(state["project_id"], canon=canon)
     scm = SceneryManager(state["project_id"], canon=canon)
     llm = ChatOpenAI(model=os.getenv("OPENAI_MODEL_ID"), temperature=0)
@@ -275,20 +418,53 @@ def world_model_builder(state: AgentState):
     
     known_character_images = {c["name"].lower(): c.get("image_urls", [c["image_url"]] if c.get("image_url") else []) for c in backend_chars}
     known_scenery_images = {s["name"].lower(): s.get("image_urls", [s["image_url"]] if s.get("image_url") else []) for s in backend_scenes}
+    enable_parallel_world_traits = os.getenv("ENABLE_PARALLEL_WORLD_TRAITS", "1").strip().lower() not in {"0", "false", "no", "off"}
+    max_world_trait_workers = max(1, int(os.getenv("WORLD_TRAITS_CONCURRENCY", "2")))
+    force_world_traits_refresh = os.getenv("FORCE_WORLD_TRAITS_REFRESH", "0").strip().lower() in {"1", "true", "yes", "on"}
+    pending_trait_jobs = {}
+
+    def queue_trait_job(kind: str, name: str, image_urls: List[str]):
+        unique_images = []
+        for image_url in image_urls or []:
+            if image_url and image_url not in unique_images:
+                unique_images.append(image_url)
+        if not unique_images:
+            return
+
+        key = (kind, name.lower())
+        if key not in pending_trait_jobs:
+            pending_trait_jobs[key] = {
+                "kind": kind,
+                "name": name,
+                "image_urls": unique_images,
+            }
+            return
+
+        for image_url in unique_images:
+            if image_url not in pending_trait_jobs[key]["image_urls"]:
+                pending_trait_jobs[key]["image_urls"].append(image_url)
     
     # 1. Registrar OBLIGATORIAMENTE los personajes y escenarios del wizard (backend)
     for b_char in backend_chars:
         name = b_char["name"]
         description = b_char.get("description", "")
         img_urls = b_char.get("image_urls", [b_char["image_url"]] if b_char.get("image_url") else [])
-        cm.register_character(name, description, img_urls)
+        should_extract = cm.register_character(name, description, img_urls, extract_traits=False, force_extract=force_world_traits_refresh)
+        if should_extract:
+            queue_trait_job("character", name, img_urls)
+        else:
+            print(f"DEBUG: [WorldModelBuilder] Skipping traits for character '{name}' (already present and force disabled).")
         print(f"DEBUG: [Wizard Asset] Character '{name}' registered from backend with {len(img_urls)} images.")
 
     for b_scene in backend_scenes:
         name = b_scene["name"]
         description = b_scene.get("description", "")
         img_urls = b_scene.get("image_urls", [b_scene["image_url"]] if b_scene.get("image_url") else [])
-        scm.register_scenery(name, description, img_urls)
+        should_extract = scm.register_scenery(name, description, img_urls, extract_traits=False, force_extract=force_world_traits_refresh)
+        if should_extract:
+            queue_trait_job("scenery", name, img_urls)
+        else:
+            print(f"DEBUG: [WorldModelBuilder] Skipping traits for scenery '{name}' (already present and force disabled).")
         print(f"DEBUG: [Wizard Asset] Scenery '{name}' registered from backend with {len(img_urls)} images.")
 
     # Recargar listas actualizadas del canon para el prompt
@@ -317,9 +493,11 @@ def world_model_builder(state: AgentState):
         "sceneries": [{{"name": "nombre (Respetar nombres ya listados)", "description": "descripción visual detallada"}}]
     }}
     """
-    
+    traits_applied = False
+
     try:
-        response = llm.invoke(prompt)
+        with timed_step("world_model_builder.llm_invoke"):
+            response = llm.invoke(prompt)
         content = response.content.strip()
         if content.startswith("```json"):
             content = content[7:-3].strip()
@@ -360,7 +538,12 @@ def world_model_builder(state: AgentState):
                         images.append(p)
                         break
 
-            cm.register_character(target_name, description, list(set(images)))
+            dedup_images = list(set(images))
+            should_extract = cm.register_character(target_name, description, dedup_images, extract_traits=False, force_extract=force_world_traits_refresh)
+            if should_extract:
+                queue_trait_job("character", target_name, dedup_images)
+            elif dedup_images:
+                print(f"DEBUG: [WorldModelBuilder] Skipping traits for character '{target_name}' (already present and force disabled).")
             
         # Ingest Sceneries
         for scene in data.get("sceneries", []):
@@ -394,14 +577,77 @@ def world_model_builder(state: AgentState):
                         print(f"DEBUG: Scenery '{target_name}' matched by name in file '{p}'")
                         break
             
-            scm.register_scenery(target_name, description, list(set(images)))
-            print(f"Registered scenery: {target_name} with {len(images)} images.")
+            dedup_images = list(set(images))
+            should_extract = scm.register_scenery(target_name, description, dedup_images, extract_traits=False, force_extract=force_world_traits_refresh)
+            if should_extract:
+                queue_trait_job("scenery", target_name, dedup_images)
+            elif dedup_images:
+                print(f"DEBUG: [WorldModelBuilder] Skipping traits for scenery '{target_name}' (already present and force disabled).")
+            print(f"Registered scenery: {target_name} with {len(dedup_images)} images.")
+
+        if pending_trait_jobs:
+            print(f"DEBUG: [WorldModelBuilder] Pending trait jobs: {len(pending_trait_jobs)}")
+
+            @traceable(name="world_model_trait_job", project_name=os.getenv("LANGCHAIN_PROJECT", "comic-draft-ai"))
+            def resolve_trait_job(job: Dict[str, object]) -> Dict[str, object]:
+                try:
+                    if job["kind"] == "character":
+                        traits = cm.analyze_visual_traits(job["name"], job["image_urls"])
+                    else:
+                        traits = scm.analyze_visual_traits(job["name"], job["image_urls"])
+                    return {**job, "traits": traits}
+                except Exception as trait_error:
+                    print(f"WARNING: Trait job failed for {job['kind']} '{job['name']}': {trait_error}")
+                    return {**job, "traits": None}
+
+            resolved_trait_jobs = []
+            trait_jobs = list(pending_trait_jobs.values())
+
+            if enable_parallel_world_traits and len(trait_jobs) > 1 and max_world_trait_workers > 1:
+                worker_count = min(max_world_trait_workers, len(trait_jobs))
+                print(f"DEBUG: [WorldModelBuilder] Parallel trait extraction enabled with {worker_count} workers.")
+                with timed_step("world_model_builder.parallel_traits"):
+                    with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="world-traits") as executor:
+                        futures = [submit_with_current_context(executor, resolve_trait_job, job) for job in trait_jobs]
+                        for future in as_completed(futures):
+                            resolved_trait_jobs.append(future.result())
+            else:
+                print("DEBUG: [WorldModelBuilder] Using sequential trait extraction.")
+                for job in trait_jobs:
+                    resolved_trait_jobs.append(resolve_trait_job(job))
+
+            for job in resolved_trait_jobs:
+                traits = job.get("traits")
+                if traits is None:
+                    continue
+                if job["kind"] == "character":
+                    canon.update_character(job["name"], {"visual_traits": traits})
+                else:
+                    canon.update_scenery(job["name"], {"visual_traits": traits})
+            traits_applied = True
             
     except Exception as e:
         print(f"Error extracting world elements: {e}")
+    finally:
+        if pending_trait_jobs and not traits_applied:
+            print("DEBUG: [WorldModelBuilder] Applying pending trait jobs in fallback mode.")
+            for job in pending_trait_jobs.values():
+                try:
+                    if job["kind"] == "character":
+                        traits = cm.analyze_visual_traits(job["name"], job["image_urls"])
+                        canon.update_character(job["name"], {"visual_traits": traits})
+                    else:
+                        traits = scm.analyze_visual_traits(job["name"], job["image_urls"])
+                        canon.update_scenery(job["name"], {"visual_traits": traits})
+                except Exception as trait_error:
+                    print(f"WARNING: Fallback trait job failed for {job['kind']} '{job['name']}': {trait_error}")
+        if batch_canon_save:
+            canon.autosave = True
+            canon.flush()
         
     return {"current_step": "planner", "continuity_state": {}, "canvas_dimensions": "800x1100 (A4)"}
 
+@timed_function("node.planner")
 def planner(state: AgentState):
     existing_panels = state.get("panels", [])
     max_panels = state.get("max_panels")
@@ -663,6 +909,7 @@ def planner(state: AgentState):
         traceback.print_exc()
         raise e
 
+@timed_function("node.image_generator")
 def image_generator(state: AgentState):
     print("--- AGENT F & H: MULTIMODAL IMAGE GENERATION ---")
     adapter = get_image_adapter()
@@ -694,10 +941,12 @@ def image_generator(state: AgentState):
             continue
 
         # Agent H: Update continuity based on the action
-        continuity = cs.update_state(continuity, panel)
+        with timed_step(f"image_generator.continuity[{panel.get('id')}]"):
+            continuity = cs.update_state(continuity, panel)
         
         # Agent F: Build Layered Prompt
-        augmented_prompt = pb.build_panel_prompt(panel, state["world_model_summary"], continuity)
+        with timed_step(f"image_generator.prompt_build[{panel.get('id')}]"):
+            augmented_prompt = pb.build_panel_prompt(panel, state["world_model_summary"], continuity)
         
         # Enrich with panel purpose from Story Understanding
         panel_purposes = state.get("panel_purposes", {})
@@ -771,9 +1020,11 @@ def image_generator(state: AgentState):
             # Usamos edit_image para que el adapter gestione la descarga de la URL antes de procesar
             # Pasamos unique_context para que Gemini (u otros) usen personajes/referencias incluso en I2I
             print(f"DEBUG: I2I/Editing panel {panel['id']} using init_image: {init_image}")
-            url = adapter.edit_image(original_image_url=init_image, prompt=augmented_prompt, style_prompt=panel.get('panel_style'), context_images=unique_context)
+            with timed_step(f"image_generator.render_edit[{panel.get('id')}]"):
+                url = adapter.edit_image(original_image_url=init_image, prompt=augmented_prompt, style_prompt=panel.get('panel_style'), context_images=unique_context)
         else:
-            url = adapter.generate_panel(augmented_prompt, style_prompt=panel.get('panel_style'), aspect_ratio=aspect_ratio, context_images=unique_context)
+            with timed_step(f"image_generator.render_new[{panel.get('id')}]"):
+                url = adapter.generate_panel(augmented_prompt, style_prompt=panel.get('panel_style'), aspect_ratio=aspect_ratio, context_images=unique_context)
             
         panel["image_url"] = url
         panel["status"] = "generated"
@@ -782,6 +1033,7 @@ def image_generator(state: AgentState):
         
     return {"panels": updated_panels, "continuity_state": continuity, "current_step": "balloons"}
 
+@timed_function("node.layout_designer")
 def layout_designer(state: AgentState):
     print("--- DEFINING PAGE LAYOUTS (Templates) ---")
     panels = state.get("panels", [])
@@ -885,6 +1137,7 @@ def layout_designer(state: AgentState):
 
     return {"panels": updated_panels, "current_step": "generator"}
 
+@timed_function("node.page_merger")
 def page_merger(state: AgentState):
     print("--- ORGANIC PAGE MERGE (Image-to-Image with Composite & Balloons) ---")
     from core.utils import PageRenderer
@@ -926,7 +1179,8 @@ def page_merger(state: AgentState):
         print(f"Merging Page {page_num}...")
         
         # 1. Crear el collage base con globos (como guía para la IA)
-        composite_path = renderer.create_composite_page(panel_list, include_balloons=True)
+        with timed_step(f"page_merger.composite[{page_num}]"):
+            composite_path = renderer.create_composite_page(panel_list, include_balloons=True)
         
         # 1.5. Análisis Multimodal para Blend (Uso de Gemini con Fallback)
         import base64
@@ -969,7 +1223,8 @@ def page_merger(state: AgentState):
             print(f"ERROR: All models failed for vision analysis. Fallback to default prompt. Last error: {last_error}")
             return "Blend the backgrounds smoothly."
 
-        visual_blend_description = get_visual_blend_description(composite_b64, vision_prompt)
+        with timed_step(f"page_merger.visual_analysis[{page_num}]"):
+            visual_blend_description = get_visual_blend_description(composite_b64, vision_prompt)
         print(f"Visual Blend Insight: {visual_blend_description[:100]}...")
 
         user_instr = state.get('instructions', '')
@@ -996,12 +1251,13 @@ def page_merger(state: AgentState):
         try:
             # 2. Generar mezcla orgánica via Image-to-Image (especializado para fusión)
             print(f"DEBUG: [PageMerger] Sending Page {page_num} to provider for organic blend...")
-            raw_merged_s3_key = adapter.generate_page_merge(
-                merge_prompt,
-                style_prompt=state.get('style_guide', ''),
-                init_image_path=composite_path, 
-                context_images=merge_context_images
-            ) 
+            with timed_step(f"page_merger.render[{page_num}]"):
+                raw_merged_s3_key = adapter.generate_page_merge(
+                    merge_prompt,
+                    style_prompt=state.get('style_guide', ''),
+                    init_image_path=composite_path, 
+                    context_images=merge_context_images
+                ) 
             
             # Guardamos esta página para que sea referencia de la siguiente
             last_page_s3_key = raw_merged_s3_key
@@ -1032,6 +1288,7 @@ def page_merger(state: AgentState):
     # CRITICO: Debemos devolver los PANELS también para que el backend guarde los globos y URLs de imagen
     return {"merged_pages": merged_results, "panels": state["panels"], "current_step": "done"}
 
+@timed_function("node.balloon_generator")
 def balloon_generator(state: AgentState):
     print("--- GENERATING DIALOGUE BALLOONS ---")
     llm = ChatOpenAI(model=os.getenv("OPENAI_MODEL_ID"), temperature=0)
@@ -1065,7 +1322,8 @@ def balloon_generator(state: AgentState):
     """
     
     try:
-        response = llm.invoke(prompt)
+        with timed_step("balloon_generator.llm_invoke"):
+            response = llm.invoke(prompt)
         content = response.content.strip()
         if content.startswith("```json"):
             content = content[7:-3].strip()

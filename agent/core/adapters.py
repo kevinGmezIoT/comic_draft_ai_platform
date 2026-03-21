@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 import os
 import boto3
 from openai import OpenAI
+from .telemetry import timed_function, timed_step
 
 class ImageModelAdapter(ABC):
     @abstractmethod
@@ -193,6 +194,7 @@ class GoogleGeminiAdapter(ImageModelAdapter):
             google_api_key=self.api_key,
             temperature=0.1
         )
+        self._context_image_cache = {}
 
     def generate_panel(self, prompt: str, style_prompt: str = "", aspect_ratio: str = "1:1", context_images: list = None, **kwargs) -> str:
         """Implementación específica de Gemini con contexto de personajes."""
@@ -204,6 +206,7 @@ class GoogleGeminiAdapter(ImageModelAdapter):
         enriched_prompt = prompt + "\nPrevious page reference in image(s) attached."
         return self.generate_image(enriched_prompt, style_prompt=style_prompt, init_image_path=init_image_path, context_images=context_images, **kwargs)
 
+    @timed_function("adapter.gemini.generate_image")
     def generate_image(self, prompt: str, style_prompt: str = "", aspect_ratio: str = "1:1", init_image_path: str = None, context_images: list = None, **kwargs) -> str:
         from langchain_core.messages import HumanMessage
         from langchain_google_genai import Modality
@@ -244,6 +247,15 @@ class GoogleGeminiAdapter(ImageModelAdapter):
                 print(f"DEBUG: Processing {len(all_input_images)} context images for Gemini...")
                 for idx, img_url in enumerate(all_input_images):
                     try:
+                        cache_key = str(img_url)
+                        if cache_key in self._context_image_cache:
+                            print(f"DEBUG: Reusing normalized context image: {cache_key}")
+                            message_content.append({
+                                "type": "image_url",
+                                "image_url": {"url": self._context_image_cache[cache_key]}
+                            })
+                            continue
+
                         img_bytes = None
                         if not img_url: continue
 
@@ -338,9 +350,11 @@ class GoogleGeminiAdapter(ImageModelAdapter):
                         
                         # LangChain multimodal format
                         img_base64 = base64.b64encode(normalized_bytes).decode("utf-8")
+                        data_url = f"data:{mime_type};base64,{img_base64}"
+                        self._context_image_cache[cache_key] = data_url
                         message_content.append({
                             "type": "image_url",
-                            "image_url": {"url": f"data:{mime_type};base64,{img_base64}"}
+                            "image_url": {"url": data_url}
                         })
                     except Exception as e:
                         print(f"WARNING: Failed to load/normalize context image {img_url}: {e}")
@@ -361,11 +375,12 @@ class GoogleGeminiAdapter(ImageModelAdapter):
 
             # 4. Invoke model via LangChain for full traceability
             # IMPORTANT: response_modalities must be a list of Enums, not strings.
-            response = self.llm.invoke(
-                [HumanMessage(content=message_content)],
-                response_modalities=[Modality.IMAGE],
-                image_config={"aspect_ratio": target_ar}
-            )
+            with timed_step("adapter.gemini.llm_invoke"):
+                response = self.llm.invoke(
+                    [HumanMessage(content=message_content)],
+                    response_modalities=[Modality.IMAGE],
+                    image_config={"aspect_ratio": target_ar}
+                )
 
             # 5. Extract image from response
             image_bytes = None

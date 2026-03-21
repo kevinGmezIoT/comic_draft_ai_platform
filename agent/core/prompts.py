@@ -4,6 +4,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from .knowledge import CharacterManager, StyleManager, SceneryManager, CanonicalStore
 from .models import Panel
+from .telemetry import timed_function, timed_step
 
 class PromptBuilder:
     """Agent F: Prompt Builder - Composes layered prompts for image generation."""
@@ -13,6 +14,7 @@ class PromptBuilder:
         self.sm = StyleManager(project_id, canon=self.canon)
         self.scm = SceneryManager(project_id, canon=self.canon)
         
+    @timed_function("prompt_builder.build_panel_prompt")
     def build_panel_prompt(self, panel: Panel, world_summary: str, continuity_state: Dict) -> str:
         # Layer 1: Style Override or Global Style
         panel_style = panel.get("panel_style")
@@ -135,7 +137,8 @@ class PromptBuilder:
             Responde ÚNICAMENTE con el prompt en inglés o español según sea más efectivo para la IA de imagen.
             """
         try:
-            visual_prompt = llm.invoke(reasoning_prompt).content.strip()
+            with timed_step(f"prompt_builder.llm_invoke[{panel.get('id', 'unknown')}]"):
+                visual_prompt = llm.invoke(reasoning_prompt).content.strip()
             return visual_prompt
         except Exception as e:
             print(f"Error in PromptBuilder reasoning: {e}")
