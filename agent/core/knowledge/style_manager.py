@@ -3,12 +3,14 @@ import os
 from typing import Optional
 from langchain_openai import ChatOpenAI
 from .canonical_store import CanonicalStore
+from ..telemetry import timed_function, timed_step
 
 class StyleManager:
     """Agent B component for managing visual rules and tokens."""
     def __init__(self, project_id: str, canon: Optional[CanonicalStore] = None):
         self.canon = canon or CanonicalStore(project_id)
 
+    @timed_function("style.normalize")
     def normalize_style(self, style_guide_text: str):
         if not style_guide_text or len(style_guide_text.strip()) < 10:
             print("DEBUG: Style guide text too short, skipping normalization.")
@@ -30,13 +32,14 @@ class StyleManager:
         {{"style_tokens": ["...", "..."]}}
         """
         try:
-            res = llm.invoke(
-                prompt, 
-                config={
-                    "tags": ["style-normalization", self.canon.project_id],
-                    "metadata": {"project_id": self.canon.project_id}
-                }
-            )
+            with timed_step("style.normalize.llm_invoke"):
+                res = llm.invoke(
+                    prompt, 
+                    config={
+                        "tags": ["style-normalization", self.canon.project_id],
+                        "metadata": {"project_id": self.canon.project_id}
+                    }
+                )
             content = res.content.strip()
             if "```json" in content:
                 content = content.split("```json")[1].split("```")[0].strip()

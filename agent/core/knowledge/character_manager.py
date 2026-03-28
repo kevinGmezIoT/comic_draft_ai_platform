@@ -3,10 +3,12 @@ import json
 import base64
 import requests
 from typing import List, Dict, Optional
+from langsmith import traceable
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
 from .canonical_store import CanonicalStore
 from .utils import normalize_key
+from ..telemetry import timed_function, timed_step
 
 class CharacterManager:
     """Gestiona la consistencia de personajes mediante 'Character Bibles'"""
@@ -14,6 +16,82 @@ class CharacterManager:
         self.project_id = project_id
         self.canon = canon or CanonicalStore(project_id)
 
+    @traceable(name="character_analyze_visual_traits", project_name=os.getenv("LANGCHAIN_PROJECT", "comic-draft-ai"))
+    @timed_function("character.analyze_visual_traits")
+    def analyze_visual_traits(self, name: str, image_urls: List[str]) -> List[str]:
+        """Compute visual traits without mutating the canon."""
+        if not image_urls:
+            return []
+
+        print(f"DEBUG: [CharacterManager] Starting visual trait analysis for '{name}' with {len(image_urls)} images.")
+        llm = ChatGoogleGenerativeAI(model=os.getenv("GEMINI_MODEL_ID_TEXT"), temperature=0)
+
+        image_count_text = f"esta imagen de referencia" if len(image_urls) == 1 else f"estas {len(image_urls)} imagenes de referencia"
+        traits_prompt = f"""
+        Analiza {image_count_text} del personaje '{name}'.
+        Extrae rasgos visuales invariantes y detallados para incluirlos en prompts de generacion de imagenes.
+        Enfocate en:
+        - Peinado y color de cabello (textura).
+        - Color de ojos y rasgos faciales (cicatrices, tatuajes, forma).
+        - Complexion fisica.
+        - Ropa base o accesorios caracteristicos.
+        - Paleta de colores predominante.
+
+        Si hay multiples imagenes, busca los rasgos que se mantienen CONSISTENTES entre todas ellas.
+
+        Responde en formato JSON:
+        {{"traits": ["...", "..."]}}
+        """
+
+        content_parts = [{"type": "text", "text": traits_prompt}]
+
+        for image_url in image_urls:
+            if not image_url.startswith(("http", "s3://")) and image_url.startswith("projects/"):
+                bucket = os.getenv("AWS_STORAGE_BUCKET_NAME")
+                if bucket:
+                    print(f"DEBUG: Fixing relative S3 path: {image_url} -> s3://{bucket}/{image_url}")
+                    image_url = f"s3://{bucket}/{image_url}"
+
+            base_path = image_url.split('?')[0]
+            ext = os.path.splitext(base_path)[1].lower()
+            mime_type = "image/jpeg" if ext in ['.jpg', '.jpeg', '.jfif'] else "image/png"
+
+            if image_url.startswith("s3://"):
+                from ..knowledge import KnowledgeManager as KM
+                km = KM(self.project_id)
+                local_path = km._download_from_s3(image_url)
+                with open(local_path, "rb") as f:
+                    img_data = base64.b64encode(f.read()).decode("utf-8")
+            else:
+                print(f"DEBUG: Downloading image from URL: {image_url[:80]}...")
+                r = requests.get(image_url, timeout=30)
+                r.raise_for_status()
+                img_data = base64.b64encode(r.content).decode("utf-8")
+
+            content_parts.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime_type};base64,{img_data}"},
+            })
+
+        message = HumanMessage(content=content_parts)
+        with timed_step(f"character.analyze_visual_traits.llm_invoke[{name}]"):
+            response = llm.invoke([message])
+        content = response.content.strip()
+
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0].strip()
+        elif "```" in content:
+            content = content.split("```")[1].strip()
+
+        if "{" in content:
+            start = content.find("{")
+            end = content.rfind("}") + 1
+            content = content[start:end]
+
+        data = json.loads(content)
+        return data.get("traits", [])
+
+    @timed_function("character.extract_visual_traits")
     def extract_visual_traits(self, name: str, image_urls: List[str]):
         """Agent B: Vision-based trait extraction from reference images."""
         if not image_urls:
@@ -79,7 +157,8 @@ class CharacterManager:
             message = HumanMessage(content=content_parts)
             
             print(f"DEBUG: Invoking Gemini Vision for {name} with {len(image_urls)} images...")
-            response = llm.invoke([message])
+            with timed_step(f"character.extract_visual_traits.llm_invoke[{name}]"):
+                response = llm.invoke([message])
             content = response.content.strip()
             
             if "```json" in content:
@@ -99,8 +178,10 @@ class CharacterManager:
         except Exception as e:
             print(f"ERROR extracting vision traits for {name}: {e}")
 
-    def register_character(self, name: str, description: str, reference_images: list):
-        existing = self.canon.data.get("characters", {}).get(name, {})
+    @timed_function("character.register")
+    def register_character(self, name: str, description: str, reference_images: list, extract_traits: bool = True, force_extract: bool = False):
+        _, existing = self._find_character(name)
+        existing = existing or {}
         existing_traits = existing.get("visual_traits", [])
         
         char_info = {
@@ -109,8 +190,10 @@ class CharacterManager:
             "visual_traits": existing_traits
         }
         self.canon.update_character(name, char_info)
-        if reference_images and not existing_traits:
+        should_extract = bool(reference_images and (force_extract or not existing_traits))
+        if extract_traits and should_extract:
             self.extract_visual_traits(name, reference_images)
+        return should_extract
 
     def _find_character(self, name: str) -> tuple[Optional[str], Optional[Dict]]:
         chars = self.canon.data.get("characters", {})

@@ -70,7 +70,7 @@ uv sync
 ### 2. Configuración
 Activar entorno virtual
 ```bash
-.venv/bin/activate
+.venv/Scripts/activate
 ```
 
 Crear proyecto AgentCore y configurar el Wizard.

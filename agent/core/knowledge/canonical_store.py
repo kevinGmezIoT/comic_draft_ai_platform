@@ -1,8 +1,10 @@
 import os
 import json
 import boto3
+from contextlib import contextmanager
 from typing import Dict
 from .utils import normalize_key
+from ..telemetry import timed_function
 
 class CanonicalStore:
     """Agent B: Canonical Builder - Maintains the 'Official Truth' of the project in S3."""
@@ -17,9 +19,11 @@ class CanonicalStore:
             aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
             region_name=os.getenv("AWS_REGION")
         )
-        
+        self.autosave = True
+        self._dirty = False
         self.data = self._load()
 
+    @timed_function("canon.load")
     def _load(self) -> Dict:
         try:
             print(f"Loading canon from S3: s3://{self.bucket_name}/{self.s3_key}")
@@ -47,6 +51,7 @@ class CanonicalStore:
                 "metadata": { "original_keys": {} }
             }
 
+    @timed_function("canon.save")
     def save(self):
         try:
             print(f"Saving canon to S3: s3://{self.bucket_name}/{self.s3_key}")
@@ -56,8 +61,29 @@ class CanonicalStore:
                 Body=json.dumps(self.data, indent=4, ensure_ascii=False),
                 ContentType='application/json; charset=utf-8'
             )
+            self._dirty = False
         except Exception as e:
             print(f"Error saving canon to S3: {e}")
+
+    def _mark_dirty(self):
+        self._dirty = True
+        if self.autosave:
+            self.save()
+
+    def flush(self):
+        if self._dirty:
+            self.save()
+
+    @contextmanager
+    def defer_save(self):
+        previous_autosave = self.autosave
+        self.autosave = False
+        try:
+            yield self
+        finally:
+            self.autosave = previous_autosave
+            if self.autosave:
+                self.flush()
 
     def update_character(self, name: str, info: Dict):
         norm_key = normalize_key(name)
@@ -67,11 +93,11 @@ class CanonicalStore:
         if norm_key not in self.data["characters"]:
             self.data["characters"][norm_key] = {}
         self.data["characters"][norm_key].update(info)
-        self.save()
+        self._mark_dirty()
 
     def update_style(self, style_info: Dict):
         self.data["style"].update(style_info)
-        self.save()
+        self._mark_dirty()
 
     def update_scenery(self, name: str, info: Dict):
         norm_key = normalize_key(name)
@@ -81,4 +107,4 @@ class CanonicalStore:
         if norm_key not in self.data["sceneries"]:
             self.data["sceneries"][norm_key] = {}
         self.data["sceneries"][norm_key].update(info)
-        self.save()
+        self._mark_dirty()

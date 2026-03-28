@@ -4,12 +4,14 @@ from typing import Dict
 from langchain_openai import ChatOpenAI
 from .knowledge import CanonicalStore
 from .models import Panel
+from .telemetry import timed_function, timed_step
 
 class ContinuitySupervisor:
     """Agent H: Continuity Supervisor - Tracks and validates state between panels."""
     def __init__(self, project_id: str):
         self.canon = CanonicalStore(project_id)
         
+    @timed_function("continuity.update_state")
     def update_state(self, current_state: Dict, panel: Panel) -> Dict:
         # Simple LLM logic to update state based on panel action
         llm = ChatOpenAI(model=os.getenv("OPENAI_MODEL_ID"), temperature=0)
@@ -42,7 +44,8 @@ class ContinuitySupervisor:
         Usa llaves en inglés para el JSON ("characters", "environment") pero puedes usar español para los valores.
         """
         try:
-            res = llm.invoke(prompt)
+            with timed_step(f"continuity.llm_invoke[{panel.get('id', 'unknown')}]"):
+                res = llm.invoke(prompt)
             content = res.content.strip()
             if "```json" in content:
                 content = content.split("```json")[1].split("```")[0].strip()

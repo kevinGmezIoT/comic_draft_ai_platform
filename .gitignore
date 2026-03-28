@@ -39,3 +39,6 @@ tests/
 /blob-report/
 /playwright/.cache/
 /playwright/.auth/
+
+# Gunicorn
+gunicorn.ctl
